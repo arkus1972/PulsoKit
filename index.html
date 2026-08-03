@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+
+<html lang="pl"> <head> <meta charset="UTF-8" /> <meta name="viewport" content="width=device-width, initial-scale=1.0" /> <title>PulsoKit – Roland TD-17 editor</title> <style> * { box-sizing: border-box; }
+
+body{
+  margin:0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  background:#0b0b0b;
+  color:#ffffff;
+  min-height:100vh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:24px;
+}
+
+.card{
+  width:100%;
+  max-width:560px;
+  background:#151515;
+  border:1px solid #2a2a2a;
+  border-radius:24px;
+  padding:32px 28px;
+  text-align:center;
+  box-shadow:0 20px 60px rgba(0,0,0,.45);
+}
+
+.logo{
+  width:96px;
+  height:96px;
+  margin:0 auto 18px;
+  border-radius:22px;
+  background:linear-gradient(135deg,#ff3b30,#b00020);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-size:42px;
+  font-weight:700;
+  box-shadow:0 12px 28px rgba(255,59,48,.35);
+}
+
+h1{
+  margin:0 0 8px;
+  font-size:2.2rem;
+  letter-spacing:.5px;
+}
+
+.subtitle{
+  color:#b8b8b8;
+  margin:0 auto 26px;
+  line-height:1.5;
+  max-width:460px;
+}
+
+.features{
+  text-align:left;
+  margin:0 auto 28px;
+  padding:0;
+  list-style:none;
+  max-width:420px;
+}
+
+.features li{
+  padding:10px 0;
+  border-bottom:1px solid #242424;
+  color:#e6e6e6;
+}
+
+.features li:last-child{ border-bottom:none; }
+
+.btn{
+  display:block;
+  width:100%;
+  padding:16px 20px;
+  margin:12px 0;
+  border-radius:16px;
+  text-decoration:none;
+  font-weight:700;
+  transition:transform .12s ease, opacity .12s ease;
+}
+
+.btn:hover{ transform:translateY(-1px); opacity:.96; }
+
+.primary{
+  background:#ff3b30;
+  color:#fff;
+  box-shadow:0 10px 24px rgba(255,59,48,.28);
+}
+
+.secondary{
+  background:#242424;
+  color:#fff;
+  border:1px solid #343434;
+}
+
+.note{
+  margin-top:18px;
+  font-size:.92rem;
+  color:#9a9a9a;
+  line-height:1.5;
+}
+
+.footer{
+  margin-top:22px;
+  font-size:.82rem;
+  color:#707070;
+}
+
+@media (max-width:480px){
+  .card{ padding:24px 18px; }
+  h1{ font-size:1.9rem; }
+  .logo{ width:84px; height:84px; font-size:36px; }
+}
+
+</style> </head> <body> <main class="card"> <div class="logo">P</div>
+
+<h1>PulsoKit</h1>
+<p class="subtitle">
+  Editor for Roland TD-17 electronic drum module.
+</p>
+
+
+<a class="btn primary" href="Pulsometron.apk">
+  Download (MAC only)
+</a>
+
+<a class="btn secondary" href="https://ko-fi.com/twojprofil" target="_blank" rel="noreferrer">
+  If you want you may donate ☕
+</a>
+
+<p class="note">
+  App is free, if you happy with using it, you may donate.
+</p>
+
+<div class="footer">
+  © 2026 PulsoKit / Arkus
+</div>
+
+</main> </body> </html>
