@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Xcode — wyniki kompilacji
+build/
+DerivedData/
+*.dSYM
+*.dSYM.zip
+*.hmap
+*.ipa
+*.moved-aside
+
+# Xcode — ustawienia jednego użytkownika, nie projektu
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# ...ale schemat współdzielony musi zostać w repozytorium, inaczej
+# `xcodebuild -scheme PulsoKit` na GitHubie nie ma czego zbudować.
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/xcshareddata/**
+
+# Pakiety zbudowane lokalnie
+*.app
+PulsoKit*.zip
