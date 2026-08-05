@@ -1,0 +1,293 @@
+name: Build
+
+# Kompilacja na prawdziwym macu z Xcode. Po każdym pushu dostajesz albo
+# gotowy PulsoKit.zip do pobrania, albo listę błędów kompilacji wprost na
+# stronie Actions — bez wchodzenia w logi.
+
+on:
+  push:
+    branches: ["**"]
+    # Push tagu `v0.99` buduje to samo, ale dodatkowo wystawia Wydanie ze
+    # stałym, publicznym linkiem — patrz ostatni krok.
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Nowy push na tę samą gałąź kasuje poprzednią, jeszcze niedokończoną
+# kompilację. Bez tego trzy pushy pod rząd to trzy równoległe maki i trzy
+# razy dłuższe czekanie na ten, który naprawdę Cię interesuje.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+# Domyślnie tylko odczyt. Uprawnienie do zapisu dostaje wyłącznie ten jeden
+# krok, który go naprawdę potrzebuje — wystawienie Wydania. Nie zamyka to
+# dziś żadnej dziury (nic w tym przebiegu nie wykonuje cudzego kodu), ale
+# przesądza, jak skończy się przyszła pomyłka.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macOS Release
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    # `contents: write` służy wyłącznie wystawieniu Wydania przy tagu.
+    # `id-token` i `attestations` — poświadczeniu pochodzenia pliku, czyli
+    # jedynej rzeczy, która pozwala odbiorcy sprawdzić, że plik naprawdę
+    # powstał z tego repozytorium. Podpis ad-hoc tego nie dowodzi: taki
+    # podpis potrafi zrobić każdy, na dowolnym pliku.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      # Przypięte do konkretnego commita, nie do ruchomego tagu `v7`.
+      # `persist-credentials: false` — bez tego `checkout` zapisuje token
+      # z prawem zapisu do `.git/config` i zostawia go tam na cały przebieg,
+      # także w trakcie kompilacji.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Wybierz najnowszy Xcode
+        run: |
+          set -euo pipefail
+          # Projekt używa synchronizowanych grup plików — formatu, którego
+          # Xcode 15 jeszcze nie rozumie i przy którym w ogóle nie otworzy
+          # projektu. Runner miewa zainstalowanych kilka wersji, więc bierzemy
+          # najnowszą zamiast liczyć na to, która akurat jest domyślna.
+          #
+          # Wersje beta odpadają: `sort -V` stawia „Xcode_26_beta" za
+          # „Xcode_26.0.1", więc bez odsiania wybieralibyśmy właśnie betę.
+          # `|| true` przy każdym podstawieniu, bo `ls` na niepasującej masce
+          # i `grep` bez trafienia zwracają błąd, a przy `set -e` to koniec
+          # kroku — mimo że oba przypadki są normalne.
+          ALL=$(ls -d /Applications/Xcode*.app 2>/dev/null || true)
+          NEWEST=$(echo "$ALL" | grep -vi beta | sort -V | tail -1 || true)
+          if [ -z "$NEWEST" ]; then
+            NEWEST=$(echo "$ALL" | sort -V | tail -1 || true)
+          fi
+          if [ -n "$NEWEST" ]; then
+            echo "Wybieram: $NEWEST"
+            sudo xcode-select -s "$NEWEST"
+          fi
+          xcodebuild -version
+          swift --version
+
+      - name: Znajdź projekt i schemat
+        id: proj
+        run: |
+          set -euo pipefail
+          # `-print -quit`, nie `| head -1`: przy `pipefail` zamknięcie potoku
+          # przez `head` zabija `find` sygnałem i cały krok wywala się na
+          # niczym.
+          PROJ=$(find . -maxdepth 3 -name '*.xcodeproj' -not -path './.*' -print -quit)
+          if [ -z "$PROJ" ]; then
+            echo "::error::Nie znalazłem żadnego .xcodeproj w repozytorium."
+            exit 1
+          fi
+          echo "Projekt: $PROJ"
+          xcodebuild -project "$PROJ" -list | tee list.txt
+
+          # Schematy Xcode trzyma domyślnie w `xcuserdata`, którego nie ma
+          # w repozytorium — na CI po prostu ich nie ma. W projekcie leży
+          # więc schemat współdzielony, a gdyby i jego zabrakło, budujemy
+          # przez `-target`, który istnieje zawsze.
+          #
+          # Czytamy **tylko** sekcję „Schemes". „PulsoKit" figuruje w tym
+          # wypisie także jako cel, więc szukanie samej nazwy w całym tekście
+          # zawsze meldowałoby, że schemat jest.
+          if awk '/^[[:space:]]*Schemes:/{f=1;next} f' list.txt \
+             | grep -qE '^[[:space:]]*PulsoKit[[:space:]]*$'; then
+            echo "Buduję przez schemat."
+            echo "selector=-scheme PulsoKit -destination generic/platform=macOS" \
+              >> "$GITHUB_OUTPUT"
+          else
+            # `-destination` idzie tylko ze schematem. Ze wskazaniem celu
+            # xcodebuild go odrzuca, więc awaryjna ścieżka musi być bez niego.
+            echo "::warning::Brak współdzielonego schematu — buduję przez -target."
+            echo "selector=-target PulsoKit" >> "$GITHUB_OUTPUT"
+          fi
+          echo "path=$PROJ" >> "$GITHUB_OUTPUT"
+
+      - name: Odczytaj numer wersji
+        id: ver
+        run: |
+          set -euo pipefail
+          # Numer wersji stoi w jednym miejscu w kodzie — ten sam, który
+          # program pokazuje w rogu okna. Trafia do nazwy pliku, żeby dało
+          # się rozróżnić dwa pobrane zipy.
+          V=""
+          CV=$(find . -name ContentView.swift -print -quit)
+          if [ -n "$CV" ]; then
+            V=$(grep -m1 -oE 'static let version = "v[0-9.]+"' "$CV" \
+                | grep -oE 'v[0-9.]+' || true)
+          fi
+          if [ -z "$V" ]; then
+            V="dev"
+          fi
+          echo "Wersja: $V"
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Kompiluj
+        run: |
+          set -o pipefail
+          # Podpisywanie wyłączone na czas kompilacji: runner nie ma i nie
+          # potrzebuje żadnego konta u Apple. Podpis ad-hoc dokładamy niżej,
+          # osobnym krokiem — bez niego macOS melduje „aplikacja jest
+          # uszkodzona" zamiast napisać, o co naprawdę chodzi.
+          #
+          # ONLY_ACTIVE_ARCH=NO: runner jest na Apple Silicon, ale program
+          # ma chodzić też na starszych Intelach. Wychodzi jedna binarka
+          # uniwersalna.
+          xcodebuild \
+            -project "${{ steps.proj.outputs.path }}" \
+            ${{ steps.proj.outputs.selector }} \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            build 2>&1 | tee build.log
+
+      - name: Podsumowanie
+        # `always()`, bo najciekawsze jest właśnie to, co się nie udało.
+        if: always()
+        run: |
+          {
+            echo "## PulsoKit ${{ steps.ver.outputs.value }}"
+            echo ""
+            WARN=0
+            if [ ! -f build.log ]; then
+              # Bez tego warunku przerwany przebieg — anulowany, przekroczony
+              # czas, błąd w którymś z wcześniejszych kroków — meldował
+              # „kompilacja bez błędów", bo pusty log to zero trafień na
+              # `error:`. Czyli dokładna odwrotność tego, po co to jest.
+              echo "Krok kompilacji w ogóle nie ruszył — nie ma `build.log`."
+              echo "Zajrzyj w kroki powyżej."
+            else
+              ERR=$(grep -E "error:" build.log | sort -u || true)
+              WARN=$(grep -cE "warning:" build.log || true)
+              if [ -n "$ERR" ]; then
+                echo "### Błędy kompilacji"
+                echo ""
+                echo '```'
+                echo "$ERR" | head -60
+                echo '```'
+              elif [ "${{ job.status }}" != "success" ]; then
+                echo "Kompilacja padła, ale bez ani jednej linii \`error:\`."
+                echo "Powód jest w pełnym logu — artefakt \`build-log-…\` niżej."
+              else
+                echo "Kompilacja bez błędów."
+              fi
+            fi
+            echo ""
+            echo "Ostrzeżeń: ${WARN:-0}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Pełny log kompilacji
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-log-${{ steps.ver.outputs.value }}
+          path: build.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Podpisz ad-hoc i spakuj
+        run: |
+          set -euo pipefail
+          APP=$(find build -name 'PulsoKit.app' -type d -print -quit)
+          if [ -z "$APP" ]; then
+            echo "::error::Kompilacja przeszła, ale nie znalazłem PulsoKit.app."
+            exit 1
+          fi
+          echo "Aplikacja: $APP"
+          lipo -archs "$APP/Contents/MacOS/PulsoKit" || true
+
+          # Podpis „na siebie". Nie wymaga konta u Apple i nie usuwa
+          # ostrzeżenia przy pierwszym otwarciu, ale na Apple Silicon bez
+          # żadnego podpisu procesor w ogóle nie uruchomi binarki.
+          codesign --force --deep --sign - "$APP"
+          # Bez `|| true` brak dopasowania w `grep` wywaliłby cały krok mimo
+          # poprawnie podpisanej aplikacji.
+          codesign -dv --verbose=4 "$APP" 2>&1 | grep -i signature || true
+
+          # `ditto`, nie zwykły zip — zachowuje strukturę pakietu aplikacji
+          # i uprawnienia. Zwykłe spakowanie potrafi ją uszkodzić.
+          ditto -c -k --sequesterRsrc --keepParent "$APP" PulsoKit.zip
+          ls -lh PulsoKit.zip
+
+          # Suma kontrolna obok pliku. Broni przed pobraniem uciętym w połowie
+          # — a to właśnie jest najczęstsza przyczyna komunikatu „aplikacja
+          # jest uszkodzona". Nie broni przed kimś, kto może publikować
+          # Wydania: taki podmieni oba pliki naraz. Od tego jest poświadczenie
+          # pochodzenia w kroku niżej.
+          shasum -a 256 PulsoKit.zip | tee PulsoKit.zip.sha256
+
+      - name: Gotowa aplikacja
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: PulsoKit-${{ steps.ver.outputs.value }}-${{ github.sha }}
+          path: PulsoKit.zip
+          retention-days: 30
+
+      - name: Poświadczenie pochodzenia
+        # Jedyna rzecz, którą odbiorca może sprawdzić kryptograficznie.
+        # Podpis ad-hoc nie potwierdza autorstwa — taki podpis potrafi zrobić
+        # każdy, na dowolnym pliku, i `codesign -dv` pokaże to samo dla
+        # aplikacji podrobionej. Poświadczenie dowodzi, że plik wyszedł
+        # z tego repozytorium, z tego przebiegu i z tego commita:
+        #
+        #   gh attestation verify PulsoKit.zip --repo UŻYTKOWNIK/REPO
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: PulsoKit.zip
+
+      - name: Wydanie ze stałym linkiem
+        # Tylko przy pushu tagu `v…`. Artefakt wyżej pobierze wyłącznie ktoś
+        # zalogowany na GitHubie — do rozdawania ludziom nadaje się dopiero
+        # Wydanie, bo jego plik jest publiczny i ma niezmienny adres:
+        #
+        #   https://github.com/UŻYTKOWNIK/REPO/releases/latest/download/PulsoKit.zip
+        #
+        # Ten adres zawsze wskazuje na najnowsze Wydanie, więc raz wklejony
+        # w przycisk „Pobierz" na stronie nie wymaga już podmieniania.
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # `gh` jest na runnerze fabrycznie — bez dokładania cudzych akcji.
+          # Gdy Wydanie dla tego tagu już istnieje (np. przy powtórce
+          # przebiegu), podmieniamy w nim plik zamiast wywalać się na błędzie.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              PulsoKit.zip PulsoKit.zip.sha256 --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              PulsoKit.zip PulsoKit.zip.sha256 \
+              --title "PulsoKit $GITHUB_REF_NAME" \
+              --notes "Zbudowane automatycznie z commita \`$GITHUB_SHA\`.
+
+          macOS 14 lub nowszy, binarka uniwersalna (Apple Silicon i Intel).
+
+          **Pierwsze uruchomienie.** Program nie jest notaryzowany u Apple,
+          więc macOS go zablokuje. Wtedy: Ustawienia systemowe → Prywatność
+          i ochrona → na dole \"PulsoKit został zablokowany\" → **Otwórz mimo
+          to**. Wystarczy raz. Nie uruchamiaj żadnych poleceń
+          \"naprawiających\" w Terminalu.
+
+          **Sprawdzenie pliku.** \`gh attestation verify PulsoKit.zip --repo
+          $GITHUB_REPOSITORY\` — dowodzi, że plik powstał z tego repozytorium.
+          Suma kontrolna do porównania: \`PulsoKit.zip.sha256\`.
+
+          **Zanim zaczniesz.** Program zapisuje do pamięci modułu. Zrób kopię
+          zestawów (sekcja Backup), zanim cokolwiek zmienisz. Bez gwarancji.
+
+          Pełna lista zmian: [ZMIANY.md](../blob/main/ZMIANY.md)"
+          fi
