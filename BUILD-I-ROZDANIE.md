@@ -47,23 +47,71 @@ aplikacji. Zwykły zip potrafi ją uszkodzić.
 
 ## 4. Co powiedzieć odbiorcy
 
-> macOS zablokuje pierwsze uruchomienie, bo program nie jest podpisany
-> u Apple. Rozpakuj, przenieś **PulsoKit** do katalogu Programy, potem
-> **kliknij prawym przyciskiem → Otwórz** i w okienku jeszcze raz **Otwórz**.
-> Wystarczy raz — kolejne uruchomienia idą normalnie.
+> macOS zablokuje pierwsze uruchomienie, bo program nie jest notaryzowany
+> u Apple. Rozpakuj, przenieś **PulsoKit** do katalogu Programy i spróbuj go
+> otworzyć. Gdy system odmówi: **Ustawienia systemowe → Prywatność i ochrona**
+> → na dole **„PulsoKit został zablokowany" → Otwórz mimo to**. Wystarczy raz.
 >
-> Jeśli system pokaże „nie można sprawdzić, czy nie zawiera złośliwego
-> oprogramowania" i nie da przycisku Otwórz: Ustawienia systemowe →
-> Prywatność i ochrona → na dole „PulsoKit został zablokowany" → **Otwórz
-> mimo to**.
+> (Na macOS 14 i starszych działa też prawy przycisk → Otwórz. Od macOS 15
+> Apple tę drogę zamknął, więc powyższa jest pewniejsza.)
 >
-> A jeśli mimo wszystko wyskoczy **„aplikacja jest uszkodzona"** — to znaczy,
-> że plik przeszedł przez internet i dostał znacznik kwarantanny. Wtedy raz,
-> w Terminalu:
+> Jeśli wyskoczy **„aplikacja jest uszkodzona"**, prawie zawsze znaczy to, że
+> plik pobrał się niekompletnie. Pobierz go jeszcze raz ze strony Wydań
+> i porównaj sumę kontrolną:
 >
 > ```sh
-> xattr -cr /Applications/PulsoKit.app
+> shasum -a 256 PulsoKit.zip
 > ```
+>
+> **Nie uruchamiaj żadnych poleceń „naprawiających" w Terminalu.**
+
+### Dlaczego zniknęło stąd `xattr -cr`
+
+Ta instrukcja stała tu wcześniej i było to błędem. Trzy powody, od
+najważniejszego:
+
+**Uczy ludzi złego odruchu.** „Pobierz program z internetu, a potem wklej
+w Terminal polecenie, którego nie rozumiesz, żeby ostrzeżenie zniknęło" —
+to dokładnie ten sam scenariusz, który dołącza się do podrobionych
+instalatorów. Działa właśnie dlatego, że uczciwi autorzy sami go publikują.
+Kto raz to zrobił i nic złego się nie stało, zrobi to i następnym razem —
+a następny plik może już nie być od Ciebie.
+
+**Wyłącza więcej, niż się wydaje.** Skasowanie znacznika kwarantanny sprawia,
+że Gatekeeper nie sprawdza pliku **w ogóle** — łącznie ze skanowaniem
+antywirusowym XProtect przy pierwszym uruchomieniu. Droga przez Ustawienia
+robi coś innego: pełne sprawdzenie się odbywa, a użytkownik świadomie
+przechodzi ponad jego wynikiem. Dla czystego pliku efekt jest ten sam, ale
+mechanizm zupełnie inny.
+
+**Jest zbyt szerokie.** `-c` kasuje *wszystkie* atrybuty rozszerzone, `-r`
+na każdym pliku w pakiecie.
+
+Gdybyś kiedyś potrzebował furtki, wersja celowana to
+`xattr -dr com.apple.quarantine /ścieżka/PulsoKit.app` — jeden nazwany atrybut,
+jedna ścieżka. Ale prościej i lepiej: pobrać plik jeszcze raz.
+
+## 4a. Jak odbiorca sprawdzi, że plik jest od Ciebie
+
+Podpis ad-hoc **nie potwierdza autorstwa**. To skrót pliku bez klucza i bez
+łańcucha zaufania — `codesign -dv` pokaże `Signature=adhoc` tak samo dla Twojej
+aplikacji, jak dla podrobionej. Nie ma się na czym oprzeć.
+
+Realne sprawdzenie daje poświadczenie pochodzenia, które GitHub wystawia przy
+każdym wydaniu za darmo (konfiguracja jest już w `.github/workflows/build.yml`):
+
+```sh
+gh attestation verify PulsoKit.zip --repo arkus1972/PulsoKit
+```
+
+Dowodzi kryptograficznie, że plik powstał w tym repozytorium, w tym przebiegu
+kompilacji, z tego commita.
+
+**Najważniejsze zabezpieczenie tego wszystkiego leży jednak poza kodem:** Twoje
+konto na GitHubie. Kto się na nie dostanie, podmieni plik pod adresem
+`releases/latest/download/PulsoKit.zip` i nikt tego nie zauważy. Włącz
+uwierzytelnianie dwuskładnikowe kluczem sprzętowym albo passkey — pięć minut,
+a jest to pojedyncza rzecz o największym znaczeniu w całym rozdawaniu.
 
 Do pracy potrzebny jest TD-17 podłączony kablem USB i włączony **przed**
 uruchomieniem programu. Program sam odczyta kit wybrany na module.
@@ -104,16 +152,24 @@ im pola. Uwaga: macOS **nie zaokrągla rogów sam** — grafika musi mieć
 gotowy kształt zaokrąglonego kwadratu z marginesem dookoła, inaczej ikona
 będzie ostrym kwadratem odstającym od reszty systemu.
 
-## 6. Termin ważności
+## 6. Termin ważności — wyłączony
 
-Ta wersja przestaje działać **29 września 2026**. Na dwa tygodnie przed
-terminem pokazuje pasek z licznikiem dni, po terminie — ekran z informacją
-o wygaśnięciu i nic więcej. Termin siedzi w `AppExpiry.swift`, w jednym
-miejscu:
+Program **nie wygasa**. Cały mechanizm został w `AppExpiry.swift`, ale jest
+zgaszony jednym wyłącznikiem:
+
+```swift
+static let isEnabled = false
+```
+
+Gdybyś kiedyś chciał go przywrócić — zmieniasz na `true` i ustawiasz datę
+w wierszu obok:
 
 ```swift
 static let lastDay = DateComponents(year: 2026, month: 9, day: 29)
 ```
+
+Wtedy na dwa tygodnie przed terminem pojawia się pasek z licznikiem dni,
+a po terminie ekran z informacją o wygaśnięciu i ani jeden bajt na kabel.
 
 ## 7. Czego ta wersja NIE ma
 

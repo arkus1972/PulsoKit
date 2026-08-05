@@ -1391,8 +1391,22 @@ struct LevelField: View {
                 value: Binding(
                     get: { Double(tenths) / 10 },
                     set: {
-                        let value = Int(($0 * 10).rounded())
-                        tenths = min(range.upperBound, max(range.lowerBound, value))
+                        // Przycinamy jeszcze w liczbach zmiennoprzecinkowych.
+                        // `Int(Double)` jest inicjalizatorem pułapkującym:
+                        // dwadzieścia dziewiątek wpisanych w to pole dają
+                        // wartość spoza zakresu `Int` i program ginie na
+                        // miejscu. Pola inspektora są aktywne także w trakcie
+                        // serii wysyłki, więc taki zgon potrafił przeciąć
+                        // zapis w połowie.
+                        guard $0.isFinite else { return }
+                        let value = ($0 * 10).rounded()
+                        if value <= Double(range.lowerBound) {
+                            tenths = range.lowerBound
+                        } else if value >= Double(range.upperBound) {
+                            tenths = range.upperBound
+                        } else {
+                            tenths = Int(value)
+                        }
                     }
                 ),
                 format: .number.precision(.fractionLength(1))

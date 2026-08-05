@@ -5,7 +5,7 @@ import SwiftUI
 struct ContentView: View {
     /// Jedno miejsce na numer wersji — pokazuje go pasek tytułu i ekran
     /// wygaśnięcia.
-    static let version = "v0.98"
+    static let version = "v1.0"
 
     @EnvironmentObject private var midi: MIDIManager
     @EnvironmentObject private var td0: TD0EditorModel
@@ -69,9 +69,12 @@ struct ContentView: View {
     }
 
     var body: some View {
-        // Wersja testowa po terminie nie wpuszcza dalej. Sprawdzenie jest tu,
-        // a nie przy starcie, bo program potrafi chodzić tygodniami — data
-        // musi być sprawdzana także wtedy, gdy termin minie w trakcie pracy.
+        // Termin ważności jest **wyłączony** — `AppExpiry.isEnabled` stoi na
+        // `false`, więc ta gałąź nigdy nie prowadzi do ekranu wygaśnięcia.
+        // Zostaje na miejscu, bo przywrócenie to zmiana jednej stałej.
+        //
+        // Gdy jest włączony: sprawdzenie siedzi tutaj, a nie przy starcie, bo
+        // program potrafi chodzić tygodniami i termin może minąć w trakcie.
         Group {
             // `expiryTick` wchodzi tu jako argument tylko po to, żeby widok
             // zależał od zegara — inaczej SwiftUI nie miałby powodu przeliczyć
@@ -85,6 +88,9 @@ struct ContentView: View {
         .onReceive(
             Timer.publish(every: 60, on: .main, in: .common).autoconnect()
         ) { _ in
+            // Przy wyłączonym terminie nie ruszamy `expiryTick` — inaczej
+            // widok przeliczałby się co minutę bez żadnego powodu.
+            guard AppExpiry.isEnabled else { return }
             AppExpiry.stampToday()
             expiryTick &+= 1
         }
@@ -116,7 +122,13 @@ struct ContentView: View {
                     .font(.system(size: 22, weight: .bold))
                 Text("PulsoKit \(Self.version) stopped working on \(AppExpiry.formattedDeadline).")
                     .foregroundStyle(.secondary)
-                Text("Nothing was changed in your module. Ask for a newer build.")
+                // Nie „nic nie zostało zmienione". Termin sprawdza się przy
+                // każdej wiadomości z osobna, więc seria zapisów mogła zdążyć
+                // przejść w połowie, zanim zegar przekroczył datę.
+                Text(
+                    "Anything already sent to the module stays in it. "
+                        + "Ask for a newer build."
+                )
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -1053,6 +1065,16 @@ struct ContentView: View {
                                 }
                             }
                         }
+                        // Jeden wyłącznik na wszystkie przyciski przywracania.
+                        //
+                        // Każdy z nich wysyła zapis do modułu, a żaden nie
+                        // pytał wcześniej, czy coś już nie trwa. Kliknięcie
+                        // w trakcie serii z edytora, w środku szybkiego zapisu
+                        // albo podczas ustawiania się modułu wpuszczało drugi
+                        // zapis w środek pierwszego. `.disabled` schodzi w dół
+                        // drzewa widoków i dziecko nie może się z niego
+                        // wyłamać, więc wystarczy tutaj.
+                        .disabled(midi.isOperationInProgress)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(6)
                     }
@@ -1086,6 +1108,16 @@ struct ContentView: View {
                 Button("Dump module setup") { midi.dumpModuleSetup() }
                     .disabled(midi.isOperationInProgress || midi.selectedOutputID == nil)
             }
+            // „Copy log" jest po to, żeby log gdzieś wkleić — zwykle publicznie.
+            // A log zawiera nazwy urządzeń MIDI, które na wielu komputerach
+            // biorą się z nazwy samego komputera („MacBook Pro Jana
+            // Kowalskiego"), oraz nazwy kitów wpisane przez użytkownika.
+            Text(
+                "The log contains your MIDI device names and kit names — "
+                    + "take a look before pasting it somewhere public."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
             // Log renderowany leniwie, linia po linii.
             //
             // Wcześniej był to jeden `Text` z całą zawartością i włączonym

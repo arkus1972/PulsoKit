@@ -752,7 +752,19 @@ final class MIDIManager: ObservableObject {
             scheduleKitListScan()
         }
     }
-    @Published private(set) var isBatchRestoring = false
+    /// Trwa przywracanie wsadowe z kopii zapasowej.
+    ///
+    /// Opuszczenie tej flagi gasi też `isFastWriting`. Te dwie muszą schodzić
+    /// razem: `isFastWriting` blokuje wszystkie przyciski przywracania, a gasi
+    /// się tylko w ciele zadania szybkiego zapisu. Gdyby ktokolwiek inny —
+    /// watchdog, przycisk Stop, przyszła ścieżka wyjścia — zgasił samo
+    /// `isBatchRestoring`, zadanie kończyło się przez `guard` na początku
+    /// pętli i zostawiało `isFastWriting` podniesione **na zawsze**:
+    /// przyciski wyglądałyby na aktywne, a nie robiłyby nic, aż do
+    /// ponownego uruchomienia programu.
+    @Published private(set) var isBatchRestoring = false {
+        didSet { if !isBatchRestoring { isFastWriting = false } }
+    }
     @Published private(set) var batchRestoreProgress: String?
     @Published private(set) var stabilizationSecondsRemaining = 0
     @Published var automaticallyReadChangedKit = true
@@ -955,6 +967,31 @@ final class MIDIManager: ObservableObject {
     /// twierdziłby, że nie widzi modułu — mimo że wszystko działa.
     @Published private(set) var rolandIdentityDetected = false
 
+    private var deviceRefreshTask: Task<Void, Never>?
+
+    /// Odświeżenie listy urządzeń, ale nie częściej niż raz na 200 ms.
+    ///
+    /// CoreMIDI woła powiadomienie przy każdym pojawieniu się i zniknięciu
+    /// portu, a wirtualne porty może tworzyć i kasować w pętli dowolna
+    /// aplikacja. Każde powiadomienie przeglądało wszystkie punkty końcowe
+    /// i dopisywało linię do logu — wystarczyło do zapchania głównego wątku,
+    /// czyli zamrożenia okna.
+    private func scheduleDeviceRefresh() {
+        deviceRefreshTask?.cancel()
+        deviceRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(200))
+            guard let self, !Task.isCancelled else { return }
+            self.deviceRefreshTask = nil
+            self.refreshDevices()
+        }
+    }
+
+    /// Numer urządzenia z pierwszej przyjętej odpowiedzi DT1.
+    ///
+    /// Od tej chwili odpowiedzi z innym numerem są pomijane — patrz
+    /// `decodeDT1`. Kasowany razem z wykryciem modułu, przy przepięciu kabla.
+    private var moduleDeviceID: UInt8?
+
     /// Czy jest z czym rozmawiać: albo port nazywa się TD-17, albo ktoś
     /// po drugiej stronie przedstawił się jako Roland.
     var moduleAvailable: Bool { td17Detected || rolandIdentityDetected }
@@ -988,6 +1025,32 @@ final class MIDIManager: ObservableObject {
     /// grania, bo echo nuty rozwala niedokończoną ramkę. Ale sam odsłuch musi
     /// mieć czym wysyłać: gdyby nuty pytały o `isOperationInProgress`,
     /// pierwsza z nich zablokowałaby wszystkie następne.
+    /// Czy wolno rozpocząć pojedyncze przywrócenie z kopii.
+    ///
+    /// Samo `!isWriting` nie wystarczało. Między dwoma krokami serii z edytora
+    /// flaga opada na kilkadziesiąt milisekund, a przez cały szybki zapis
+    /// i przez trzydziestosekundowe ustawianie się modułu jest opuszczona na
+    /// stałe. Wystarczyło w tym czasie kliknąć „Restore" w sekcji Backup, żeby
+    /// drugi zapis wszedł w środek pierwszego: przestawiał fazę weryfikacji,
+    /// przez co odpowiedź na tamten pierwszy nie pasowała już do niczego,
+    /// a edytor melował „moduł nie potwierdził" o zmianie, która **doszła**.
+    ///
+    /// W trakcie samej serii wsadowej pytamy dalej tylko o `isWriting` — seria
+    /// trzyma własną flagę i inaczej blokowałaby sama siebie.
+    private var canStartSingleRestore: Bool {
+        // Szybki zapis nie podnosi `isWriting` — leci blokami, bez weryfikacji
+        // każdego z osobna. Bez osobnej flagi kliknięcie „Restore" w jego
+        // trakcie przechodziło przez ten warunek, a co gorsza **pomijało
+        // własne okno potwierdzenia**, bo te sprawdzają `!isBatchRestoring`.
+        // Wchodziło więc w środek strumienia bloków, przestawiając fazę
+        // weryfikacji — czyli dokładnie to, przed czym ten warunek ma bronić.
+        if isFastWriting { return false }
+        return isBatchRestoring ? !isWriting : !isBusyWithSysEx
+    }
+
+    /// Trwa szybki zapis całego kitu (seria bloków bez weryfikacji każdego).
+    private var isFastWriting = false
+
     var isBusyWithSysEx: Bool {
         isWriting || isReadingKit || isBatchRestoring || isEditorSending
             || isScanningKitList || isDumpingSetup || isReadingTriggers
@@ -1086,15 +1149,24 @@ final class MIDIManager: ObservableObject {
             endpointInfo(for: MIDIGetDestination($0))
         }
 
-        selectedInputID = retainedSelection(
-            previousInput,
-            in: inputs
-        ) ?? td17Endpoint(in: inputs)?.id ?? inputs.first?.id
+        // Automat sięga po „pierwszy lepszy" port dopiero wtedy, gdy jest
+        // dokładnie jeden — czyli gdy nie ma czego pomylić.
+        //
+        // Wcześniej program podłączał się sam do pierwszego portu na liście.
+        // Każda aplikacja na macOS może utworzyć wirtualny port MIDI, bez
+        // żadnych uprawnień i bez pytania — a podłączone wejście może potem
+        // przestawić numer bieżącego kitu komunikatem Program Change. Adresy
+        // wszystkich zapisów liczą się z tego numeru, więc obce wejście
+        // potrafiło skierować edycję użytkownika do zupełnie innego kitu
+        // w prawdziwym module. Przy dwóch portach i więcej wybór należy
+        // teraz do człowieka.
+        selectedInputID = retainedSelection(previousInput, in: inputs)
+            ?? td17Endpoint(in: inputs)?.id
+            ?? (inputs.count == 1 ? inputs.first?.id : nil)
 
-        selectedOutputID = retainedSelection(
-            previousOutput,
-            in: outputs
-        ) ?? td17Endpoint(in: outputs)?.id ?? outputs.first?.id
+        selectedOutputID = retainedSelection(previousOutput, in: outputs)
+            ?? td17Endpoint(in: outputs)?.id
+            ?? (outputs.count == 1 ? outputs.first?.id : nil)
 
         connectSelectedInput()
 
@@ -1104,6 +1176,9 @@ final class MIDIManager: ObservableObject {
         if connectedInput == nil || (moduleWasAvailable && !td17Detected) {
             initialReadDone = false
             rolandIdentityDetected = false
+            // Po przepięciu kabla numer urządzenia trzeba poznać od nowa —
+            // po drugiej stronie może być teraz inny moduł.
+            moduleDeviceID = nil
         }
         moduleWasAvailable = td17Detected
 
@@ -1323,16 +1398,19 @@ final class MIDIManager: ObservableObject {
         var packetList = MIDIPacketList()
         let packet = MIDIPacketListInit(&packetList)
 
-        _ = bytes.withUnsafeBufferPointer { buffer in
-            MIDIPacketListAdd(
+        var added = false
+        bytes.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress, !buffer.isEmpty else { return }
+            added = MIDIPacketListAdd(
                 &packetList,
                 MemoryLayout<MIDIPacketList>.size,
                 packet,
                 0,
                 buffer.count,
-                buffer.baseAddress!
-            )
+                base
+            ) != nil
         }
+        guard added else { return }
         MIDISend(outputPort, destination, &packetList)
     }
 
@@ -1975,7 +2053,14 @@ final class MIDIManager: ObservableObject {
               let fadePoint = subFadePointDrafts[zoneIndex],
               zoneNames.indices.contains(zoneIndex),
               (0...3).contains(type),
-              Self.fadePointEditRange.contains(fadePoint)
+              // Zakres składowania, nie edycyjny. Przy warstwie MIX i SWITCH
+              // moduł trzyma tu 0, a zapis przyjmował dopiero 1 — samo
+              // włączenie warstwy SUB na takim padzie podnosiło więc Fade
+              // Point z 0 na 1: wartość, której użytkownik nie dotykał i która
+              // nie pojawiła się na liście zmian. Gdy moduł wracał do zera,
+              // weryfikacja nie zgadzała się z wysłaną wartością i cała reszta
+              // serii szła do kosza.
+              Self.fadePointStorageRange.contains(fadePoint)
         else {
             appendLog("Invalid SUB layer settings")
             return
@@ -2932,15 +3017,31 @@ final class MIDIManager: ObservableObject {
         var packetList = MIDIPacketList()
         let packet = MIDIPacketListInit(&packetList)
 
-        _ = bytes.withUnsafeBufferPointer { buffer in
-            MIDIPacketListAdd(
+        // Wynik `MIDIPacketListAdd` trzeba sprawdzić. Gdy dane nie mieszczą
+        // się w jednym pakiecie, funkcja zwraca `nil`, liczba pakietów zostaje
+        // zerem, a `MIDISend` melduje sukces mimo że nie wysłał ani bajtu.
+        // Bez tego warunku zapis, który nigdy nie opuścił programu, byłby
+        // zaraportowany jako wysłany — a przy szybkim zapisie kitu decyduje to
+        // o tym, czy program w ogóle zauważy, że przerwał w połowie.
+        var added = false
+        bytes.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress, !buffer.isEmpty else { return }
+            added = MIDIPacketListAdd(
                 &packetList,
                 MemoryLayout<MIDIPacketList>.size,
                 packet,
                 0,
                 buffer.count,
-                buffer.baseAddress!
+                base
+            ) != nil
+        }
+        guard added else {
+            lastSendFailed = true
+            appendLog(
+                "TX ERROR: the message does not fit in a single MIDI packet "
+                    + "(\(bytes.count) B)"
             )
+            return
         }
 
         let result = MIDISend(outputPort, destination.reference, &packetList)
@@ -3060,7 +3161,22 @@ final class MIDIManager: ObservableObject {
             guard let fileSize = values.fileSize, fileSize <= 1_000_000 else {
                 throw SnapshotError.invalid("The file exceeds the safe 1 MB limit")
             }
-            let data = try Data(contentsOf: url)
+
+            // Limit egzekwowany jeszcze raz, przy samym czytaniu. Poprzednio
+            // rozmiar sprawdzało się na ścieżce, a potem otwierało tę ścieżkę
+            // ponownie — plik, który urósł między jednym a drugim, wchodził
+            // do pamięci w całości.
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            // `read(upToCount:)`, nie `readData(ofLength:)` — to drugie przy
+            // błędzie wejścia-wyjścia rzuca wyjątek Objective-C, którego Swift
+            // nie potrafi przechwycić: zniknięty w trakcie dysk sieciowy albo
+            // wypięty pendrive zabijał program bez słowa. Ta wersja zgłasza
+            // zwykły błąd, który łapie `catch` poniżej.
+            let data = try handle.read(upToCount: 1_000_001) ?? Data()
+            guard data.count <= 1_000_000 else {
+                throw SnapshotError.invalid("The file exceeds the safe 1 MB limit")
+            }
             guard let root = try JSONSerialization.jsonObject(with: data)
                 as? [String: Any]
             else {
@@ -3221,16 +3337,23 @@ final class MIDIManager: ObservableObject {
         alert.messageText = "Write the whole snapshot to kit \(currentKitNumber)?"
         alert.informativeText =
             "The app will send \(blocks.count) complete data blocks, then "
-            + "read the whole kit back and compare it with the snapshot. The contents of kit "
-            + "\(currentKitNumber) will be replaced."
-        alert.addButton(withTitle: "Fast write and full verification")
+            + "read the whole kit back and compare it with the snapshot. The "
+            + "contents of kit \(currentKitNumber) will be replaced and CANNOT "
+            + "be undone — export kit \(currentKitNumber) first if you want to "
+            + "be able to go back. Do not unplug the cable, change the kit or "
+            + "power off the module until the app says it has settled."
+        // Cancel jako pierwszy, bo `NSAlert` robi z pierwszego przycisku
+        // domyślny, z klawiszem Enter. Odruchowe wciśnięcie Enter nadpisywało
+        // cały kit — bez cofnięcia i bez śladu, co tam było wcześniej.
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else {
+        alert.addButton(withTitle: "Fast write and full verification")
+        guard alert.runModal() == .alertSecondButtonReturn else {
             appendLog("Fast snapshot write cancelled")
             return
         }
 
         isBatchRestoring = true
+        isFastWriting = true
         batchRestoreTotal = blocks.count
         batchRestoreProgress = "0 of \(blocks.count)"
         status = "Fast write to kit \(currentKitNumber)…"
@@ -3244,6 +3367,29 @@ final class MIDIManager: ObservableObject {
             for (index, block) in blocks.enumerated() {
                 guard self.isBatchRestoring else { return }
                 self.sendDT1(address: block.address, data: block.data)
+
+                // Bez tego sprawdzenia wyrwany w połowie kabel, wyłączony
+                // moduł albo minięty termin ważności nie zatrzymywały pętli:
+                // licznik dobiegał do „105 z 105", a w module zostawał kit
+                // złożony z połowy nowej i połowy starej zawartości — ani
+                // stary, ani nowy, i nikt się o tym nie dowiadywał.
+                guard self.lastSendReachedTheWire else {
+                    self.isBatchRestoring = false
+                    self.isFastWriting = false
+                    self.batchRestoreProgress = nil
+                    self.stabilizeAfterCurrentRead = false
+                    self.appendLog(
+                        "FAST WRITE ABORTED at block \(index + 1) of "
+                            + "\(blocks.count) (\(block.name)). Kit "
+                            + "\(currentKitNumber) is now PARTLY written — "
+                            + "repeat the fast write before playing it."
+                    )
+                    self.status =
+                        "Fast write interrupted — kit \(currentKitNumber) "
+                        + "is incomplete"
+                    return
+                }
+
                 self.batchRestoreProgress = "\(index + 1) of \(blocks.count)"
                 self.status =
                     "Fast write \(index + 1) of \(blocks.count): \(block.name)"
@@ -3252,6 +3398,7 @@ final class MIDIManager: ObservableObject {
 
             try? await Task.sleep(for: .milliseconds(600))
             self.isBatchRestoring = false
+            self.isFastWriting = false
             self.batchRestoreProgress = nil
             self.appendLog("FAST WRITE: all blocks sent; full verification…")
             self.status = "Verification read of the whole kit…"
@@ -3592,7 +3739,7 @@ final class MIDIManager: ObservableObject {
     }
 
     func restoreSnapshotCommon(_ path: String) {
-        guard !isWriting,
+        guard canStartSingleRestore,
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
               let currentKitNumber,
@@ -3722,7 +3869,7 @@ final class MIDIManager: ObservableObject {
     func restoreSnapshotInstrument(
         _ restore: TD17SnapshotInstrumentRestore
     ) {
-        guard !isWriting,
+        guard canStartSingleRestore,
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
               let currentKitNumber,
@@ -3822,7 +3969,7 @@ final class MIDIManager: ObservableObject {
     }
 
     func restoreSnapshotLevel(_ restore: TD17SnapshotLevelRestore) {
-        guard !isWriting,
+        guard canStartSingleRestore,
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
               let currentKitNumber,
@@ -3901,7 +4048,7 @@ final class MIDIManager: ObservableObject {
     }
 
     func restoreSnapshotLayer(_ restore: TD17SnapshotLayerRestore) {
-        guard !isWriting,
+        guard canStartSingleRestore,
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
               let currentKitNumber,
@@ -3942,9 +4089,17 @@ final class MIDIManager: ObservableObject {
             type = index
             valueText = value
         default:
+            // Zakres składowania, nie edycyjny — dokładnie jak w
+            // `writeLayerSettings`. Migawka zdjęta z prawdziwego modułu ma tu
+            // 0 dla warstw MIX i SWITCH, więc przy zakresie edycyjnym przycisk
+            // przywracania wyglądał na zepsuty, a przy „przywróć wszystko"
+            // zabijał całą serię komunikatem, że pozycja nie ruszyła.
             guard let value = item["fadePoint"] as? Int,
-                  Self.fadePointEditRange.contains(value)
-            else { return }
+                  Self.fadePointStorageRange.contains(value)
+            else {
+                appendLog("Fade Point out of range in the snapshot — skipped")
+                return
+            }
             fade = value
             valueText = "\(value)"
         }
@@ -3985,7 +4140,7 @@ final class MIDIManager: ObservableObject {
     }
 
     func restoreSnapshotPan(_ restore: TD17SnapshotPanRestore) {
-        guard !isWriting,
+        guard canStartSingleRestore,
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
               let currentKitNumber,
@@ -4057,7 +4212,7 @@ final class MIDIManager: ObservableObject {
             "mfxSendTenthsDB",
             "reverbSendTenthsDB"
         ]
-        guard !isWriting,
+        guard canStartSingleRestore,
               keys.indices.contains(restore.sendIndex),
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
@@ -4142,7 +4297,7 @@ final class MIDIManager: ObservableObject {
         let shapeFields = [
             "lowFrequency", "midFrequency", "midQ", "highFrequency"
         ]
-        guard !isWriting,
+        guard canStartSingleRestore,
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
               let currentKitNumber,
@@ -4253,7 +4408,7 @@ final class MIDIManager: ObservableObject {
     func restoreSnapshotAmbienceField(
         _ restore: TD17SnapshotAmbienceRestore
     ) {
-        guard !isWriting,
+        guard canStartSingleRestore,
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
               let currentKitNumber,
@@ -4357,7 +4512,7 @@ final class MIDIManager: ObservableObject {
             "preDelay", "timeTenths", "density", "diffusion",
             "lowDamp", "highDamp", "spread", "tone"
         ]
-        guard !isWriting,
+        guard canStartSingleRestore,
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
               let currentKitNumber,
@@ -4443,7 +4598,7 @@ final class MIDIManager: ObservableObject {
     }
 
     func restoreSnapshotMFXField(_ restore: TD17SnapshotMFXRestore) {
-        guard !isWriting,
+        guard canStartSingleRestore,
               (0...34).contains(restore.parameterIndex),
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
@@ -4547,7 +4702,7 @@ final class MIDIManager: ObservableObject {
     func restoreSnapshotMasterCompField(
         _ restore: TD17SnapshotMasterCompRestore
     ) {
-        guard !isWriting,
+        guard canStartSingleRestore,
               (0...15).contains(restore.parameterIndex),
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
@@ -4640,7 +4795,7 @@ final class MIDIManager: ObservableObject {
     }
 
     func restoreSnapshotMIDINote(_ restore: TD17SnapshotMIDINoteRestore) {
-        guard !isWriting,
+        guard canStartSingleRestore,
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
               let currentKitNumber,
@@ -4717,7 +4872,7 @@ final class MIDIManager: ObservableObject {
     }
 
     func restoreSnapshotVEdit(_ restore: TD17SnapshotVEditRestore) {
-        guard !isWriting,
+        guard canStartSingleRestore,
               let importedSnapshot,
               let snapshotKit = importedSnapshot["kitNumber"] as? Int,
               let currentKitNumber,
@@ -4896,6 +5051,15 @@ final class MIDIManager: ObservableObject {
         try validateIndices(root, key: "sub", indexKey: "zoneIndex", count: 20)
         try validateIndices(root, key: "mixer", indexKey: "zoneIndex", count: 20)
         try validateIndices(root, key: "midiNotes", indexKey: "index", count: 24)
+        // Bez tego dwadzieścia wpisów V-Edit mogło wskazywać na tę samą
+        // strefę: podgląd meldował „20 stref MAIN", a szybki zapis wysyłał
+        // dwadzieścia bloków pod jeden adres, zostawiając pozostałe
+        // dziewiętnaście pól nietkniętych i nikomu o tym nie mówiąc.
+        try validateIndices(root, key: "vEditMain", indexKey: "zoneIndex", count: 20)
+        // `vEditSub` ma zmienną liczbę wpisów — tyle, ile stref ma włączoną
+        // warstwę SUB — więc nie da się wymagać dwudziestu. Wystarczy, że
+        // numery stref są sensowne i że żaden się nie powtarza.
+        try validateUniqueIndices(root, key: "vEditSub", indexKey: "zoneIndex", limit: 20)
         try validateZoneNames(root, key: "main")
         try validateZoneNames(root, key: "sub")
         try validateZoneNames(root, key: "mixer")
@@ -4925,7 +5089,12 @@ final class MIDIManager: ObservableObject {
                 subName.isEmpty ? "Description: —" : "Description: \(subName)",
                 "20 MAIN zones • 20 SUB zones (\(activeSub) active)",
                 "20 mixer blocks • 24 MIDI notes",
-                "Ambience, Reverb, MFX i Master Comp: kompletne",
+                // „Obecne", nie „kompletne". Na tym etapie sprawdzone jest
+                // tylko to, że te cztery sekcje w ogóle są — ich zawartość
+                // waliduje się dopiero przy zapisie. Napis o kompletności był
+                // obietnicą, której podgląd nie miał pokrycia czym spełnić,
+                // a stoi tuż nad przyciskiem nadpisującym cały kit.
+                "Ambience, Reverb, MFX and Master Comp: present",
                 "Preview mode — nothing was sent to the TD-17"
             ]
         )
@@ -5084,6 +5253,32 @@ final class MIDIManager: ObservableObject {
         }
     }
 
+    /// Sekcja o zmiennej długości: numery muszą mieścić się w zakresie
+    /// i nie mogą się powtarzać.
+    ///
+    /// Powtórzony numer strefy znaczy, że dwa bloki jadą pod ten sam adres,
+    /// a strefa, której brakuje, zostaje w module nietknięta — mimo że
+    /// podsumowanie przed zapisem policzyło ją jako przygotowaną.
+    private func validateUniqueIndices(
+        _ root: [String: Any],
+        key: String,
+        indexKey: String,
+        limit: Int
+    ) throws {
+        guard let items = root[key] as? [[String: Any]] else {
+            throw SnapshotError.invalid("Missing section \(key)")
+        }
+        let indices = items.compactMap { $0[indexKey] as? Int }
+        guard indices.count == items.count,
+              indices.allSatisfy({ (0..<limit).contains($0) }),
+              Set(indices).count == indices.count
+        else {
+            throw SnapshotError.invalid(
+                "Section \(key) has invalid or duplicated indices"
+            )
+        }
+    }
+
     private func snapshotDictionary(
         kitNumber: Int,
         common: TD17KitCommonInfo
@@ -5211,7 +5406,7 @@ final class MIDIManager: ObservableObject {
             &client
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.refreshDevices()
+                self?.scheduleDeviceRefresh()
             }
         }
 
@@ -5226,7 +5421,18 @@ final class MIDIManager: ObservableObject {
         // a odbiór SysEx składa ramkę bajt po bajcie — zamiana dwóch
         // porcji miejscami cicho psuła dane. Teraz wszystko idzie przez
         // jeden strumień, konsumowany po kolei.
-        let (incoming, continuation) = AsyncStream.makeStream(of: [UInt8].self)
+        //
+        // Bufor jest ograniczony. Domyślna polityka `.unbounded` znaczy, że
+        // kolejka rośnie tak długo, jak długo nadawca wyprzedza odbiorcę —
+        // a odbiorcą jest główny wątek, dzielony z całym interfejsem.
+        // Wystarczyłoby jedno gadatliwe (albo złośliwe) źródło MIDI, żeby
+        // zapchać pamięć i doprowadzić do zabicia programu przez system.
+        // Przy takim zalewie składana ramka i tak jest stracona, a `receive`
+        // łapie synchronizację na następnym `0xF0`.
+        let (incoming, continuation) = AsyncStream.makeStream(
+            of: [UInt8].self,
+            bufferingPolicy: .bufferingNewest(512)
+        )
         incomingContinuation = continuation
 
         let inputResult = MIDIInputPortCreateWithBlock(
@@ -5325,6 +5531,14 @@ final class MIDIManager: ObservableObject {
 
     private func handleProgramChange(program: Int) {
         guard automaticallyReadChangedKit else { return }
+        // Program Change przestawia numer bieżącego kitu, a z tego numeru
+        // liczy się adres każdego kolejnego zapisu. Słuchamy go więc dopiero
+        // wtedy, gdy mamy powód sądzić, że po drugiej stronie jest TD-17 —
+        // a nie dowolny port, który akurat coś wysłał.
+        guard rolandIdentityDetected || selectedPortsLookLikeTD17 else {
+            appendLog("Program Change ignored — the module is not confirmed")
+            return
+        }
         let kitNumber = program + 1
         guard (1...100).contains(kitNumber) else { return }
 
@@ -5471,6 +5685,29 @@ final class MIDIManager: ObservableObject {
             return
         }
 
+        // Bajt 2 to numer urządzenia. Program wysyła zawsze 0x10, ale w module
+        // da się go zmienić — zamiast więc wymagać konkretnej wartości,
+        // zapamiętujemy pierwszą, jaką zobaczyliśmy, i od tej pory trzymamy
+        // się jej. Dzięki temu drugi Roland na tym samym porcie albo echo
+        // z cudzego modułu przez MIDI Soft Thru nie jest już brany za nasz.
+        //
+        // **Zapamiętujemy dopiero po sprawdzeniu sumy kontrolnej.** Wcześniej
+        // zapamiętanie stało wyżej i wystarczyła jedna ramka przekłamana po
+        // drodze, żeby program na stałe zapisał sobie cudzy numer i od tej
+        // chwili po cichu odrzucał wszystko z prawdziwego modułu — a jedynym
+        // wyjściem było wypięcie kabla.
+        if let known = moduleDeviceID {
+            guard bytes[2] == known else {
+                appendLog(
+                    "DT1 ignored — device \(hex([bytes[2]])) is not the module "
+                        + "we are talking to (\(hex([known])))"
+                )
+                return
+            }
+        } else {
+            moduleDeviceID = bytes[2]
+        }
+
         if readPhase == .triggerCommon,
            address == [0x02, 0x00, 0x00, 0x20],
            data.count >= 13 {
@@ -5545,6 +5782,17 @@ final class MIDIManager: ObservableObject {
            address == [0x00, 0x00, 0x00, 0x00],
            let kitIndex = data.first {
             let actual = Int(kitIndex)
+            // Ta sama granica co przy zwykłym odczycie numeru kitu: wartość
+            // spoza 0…99 przepisana do `currentKitNumber` rozjeżdża adresy
+            // wszystkich kolejnych zapisów.
+            guard (0...99).contains(actual) else {
+                lastWriteConfirmed = false
+                appendLog("The module reported an invalid kit number: \(actual)")
+                status = "The module reported an invalid kit number"
+                readPhase = .idle
+                isWriting = false
+                return
+            }
             if actual == expected {
                 lastWriteConfirmed = true
                 appendLog("CONFIRMED switch to kit \(actual + 1)")
@@ -5594,6 +5842,18 @@ final class MIDIManager: ObservableObject {
         if readPhase == .currentKit,
            address == [0x00, 0x00, 0x00, 0x00],
            let kitIndex = data.first {
+            // TD-17 ma 100 kitów. Wszystko poza tym zakresem znaczy, że po
+            // drugiej stronie kabla nie jest to, czego się spodziewamy —
+            // a z tego numeru liczy się potem adres **każdego** zapisu.
+            guard (0...99).contains(Int(kitIndex)) else {
+                appendLog(
+                    "The module reported an invalid kit number: \(Int(kitIndex))"
+                )
+                status = "The module reported an invalid kit number"
+                readPhase = .idle
+                isReadingKit = false
+                return
+            }
             currentKitNumber = Int(kitIndex) + 1
             appendLog("Current kit number: \(Int(kitIndex) + 1)")
             readPhase = .kitName
@@ -7068,18 +7328,31 @@ final class MIDIManager: ObservableObject {
                     throw SnapshotError.invalid("Invalid V-Edit zone")
                 }
                 let label = "V-Edit \(isSub ? "SUB" : "MAIN") \(zoneNames[index])"
+                // Zakresy jak przy zapisie pojedynczego pola. Bez nich szybki
+                // zapis przyjmował wartości, które ścieżka pojedynczego zapisu
+                // odrzuca — a plik migawki to zwykły, czytelny JSON, który
+                // program sam zachęca zapisać i przesłać dalej. Jedna
+                // poprawka w edytorze tekstu wystarczała, żeby do pamięci
+                // modułu poszła liczba spoza specyfikacji.
+                //
+                // −4800…4800 i 0…100 to sumy wszystkich gałęzi `vEditRange`
+                // i zakresów strojenia, więc żadna prawdziwa wartość
+                // z modułu nie zostanie odrzucona.
                 let data: [UInt8] =
                     (try checkedSigned16(
                         integer(value, "primary"),
-                        "\(label) — parametr 1"
+                        "\(label) — parametr 1",
+                        range: -4800...4800
                     ))
                     + (try checkedUnsigned16(
                         integer(value, "secondary"),
-                        "\(label) — parametr 2"
+                        "\(label) — parametr 2",
+                        range: 0...100
                     ))
                     + (try checkedUnsigned16(
                         integer(value, "tertiary"),
-                        "\(label) — parametr 3"
+                        "\(label) — parametr 3",
+                        range: 0...100
                     ))
                 let baseAddress = isSub
                     ? subVEditAddress(zoneIndex: index, kitIndex: kitIndex)
@@ -8089,9 +8362,17 @@ final class MIDIManager: ObservableObject {
 
     private func kitAddress(kitIndex: Int) -> [UInt8] {
         // Kit 1 starts at 03 00 00 00; consecutive kits are 00 02 00 00 apart.
+        //
+        // Zacisk jest ostatnią linią obrony i celowo siedzi tutaj, w jednym
+        // miejscu, przez które przechodzi **każdy** adres zapisu do kitu.
+        // Numer kitu przychodzi z modułu, a moduł na tym łączu to cokolwiek,
+        // co odpowie z właściwą sumą kontrolną. Numer 128 dawał adres
+        // 04 7E 00 00 — daleko za końcem obszaru kitów, czyli zapis w miejsce,
+        // o którym nie wiemy nic.
+        let safeIndex = min(99, max(0, kitIndex))
         let base = 3 * 128 * 128 * 128
         let kitStride = 2 * 128 * 128
-        return encodeBase128(base + kitIndex * kitStride)
+        return encodeBase128(base + safeIndex * kitStride)
     }
 
     private func encodeBase128(_ input: Int) -> [UInt8] {
@@ -8156,6 +8437,18 @@ final class MIDIManager: ObservableObject {
     /// Pełny odczyt kitu generuje ponad 200 linii w kilka sekund. Bez
     /// buforowania każda z nich wymuszałaby osobne przeliczenie widoku.
     private func appendLog(_ message: String) {
+        // Limit **tutaj**, a nie dopiero przy zrzucie do widoku.
+        //
+        // `flushLog` najpierw przepisuje wszystko do `logLines`, a przycina
+        // dopiero potem — szczyt zużycia pamięci był więc pełny. A jedna
+        // linia logu potrafi powstać z jednego bajtu na wejściu: strumień
+        // samych `0xF0` generował komunikat „porzucona ramka" na każdy bajt.
+        // Do najbliższego zrzutu (150 ms) rosło to bez żadnej granicy.
+        if pendingLogLines.count >= maximumLogLines {
+            pendingLogLines.removeFirst(
+                pendingLogLines.count - maximumLogLines + 1
+            )
+        }
         pendingLogLines.append(message)
         guard logFlushTask == nil else { return }
 
@@ -8223,10 +8516,29 @@ final class MIDIManager: ObservableObject {
             let length = Int(packet.pointee.length)
             guard length > 0 else { continue }
 
-            withUnsafeBytes(of: packet.pointee.data) { rawBuffer in
+            // Czytamy dokładnie `length` bajtów spod adresu pola `data`,
+            // zamiast kopiować całą 256-bajtową krotkę.
+            //
+            // `packet.pointee.data` to **wczytanie wartości** wszystkich 256
+            // bajtów. Pakiety w liście leżą ciasno jeden za drugim, więc
+            // pakiet o trzech bajtach zajmuje kilkanaście — a odczyt i tak
+            // sięgał 256. Dla ostatniego pakietu wychodziło to poza bufor,
+            // który dał nam CoreMIDI. Do tego `data` jest polem o zmiennej
+            // długości: pakiet dłuższy niż 256 bajtów gubił resztę po cichu,
+            // rozbijając ramkę w środku.
+            if let dataOffset = MemoryLayout<MIDIPacket>.offset(of: \.data) {
+                let base = UnsafeRawPointer(packet).advanced(by: dataOffset)
                 result.append(
-                    contentsOf: rawBuffer.prefix(min(length, rawBuffer.count))
+                    contentsOf: UnsafeRawBufferPointer(start: base, count: length)
                 )
+            } else {
+                // Gałąź awaryjna — zachowanie sprzed poprawki. Nie powinna
+                // się nigdy wykonać, ale lepsza niż wymuszone rozpakowanie.
+                withUnsafeBytes(of: packet.pointee.data) { rawBuffer in
+                    result.append(
+                        contentsOf: rawBuffer.prefix(min(length, rawBuffer.count))
+                    )
+                }
             }
         }
 

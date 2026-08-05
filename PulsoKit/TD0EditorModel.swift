@@ -58,12 +58,23 @@ final class TD0EditorModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         do {
-            let values = try url.resourceValues(forKeys: [.fileSizeKey])
+            let values = try url.resourceValues(
+                forKeys: [.fileSizeKey, .isRegularFileKey]
+            )
+            guard values.isRegularFile == true else {
+                throw TD0Error.invalid("The selected item is not a regular file")
+            }
             guard let size = values.fileSize, size <= Self.maximumFileSize else {
-                throw TD0Error.invalid("File przekracza bezpieczny limit 64 MiB")
+                throw TD0Error.invalid("The file exceeds the safe 64 MiB limit")
             }
 
-            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+            // Bez mapowania pamięciowego. Plik i tak jest ograniczony do
+            // 64 MiB, więc mapowanie niczego nie oszczędza, a trzymamy te dane
+            // przez całe życie okna: gdyby ktoś w międzyczasie obciął plik
+            // albo wypiął pendrive'a, sięgnięcie po stronę pamięci kończy się
+            // sygnałem SIGBUS, którego w Swifcie nie da się przechwycić —
+            // program po prostu ginie, bez komunikatu.
+            let data = try Data(contentsOf: url)
             try load(data, named: url.lastPathComponent)
         } catch {
             clear(with: "File rejected: \(error.localizedDescription)")
@@ -93,20 +104,23 @@ final class TD0EditorModel: ObservableObject {
             data.replaceSubrange((coreSize - 16)..<coreSize, with: digest)
             try data.write(to: url, options: [.atomic])
 
-            let saved = try Data(contentsOf: url, options: [.mappedIfSafe])
+            let saved = try Data(contentsOf: url)
             guard saved == data else {
                 throw TD0Error.invalid("Verification of the saved copy failed")
             }
-            validationMessage = "Saved i zweryfikowano:\n\(url.path)"
+            // Pełna ścieżka zostaje na ekranie, gdzie się przydaje („gdzie
+            // trafił mój plik?"), ale nie w oknie, które ludzie fotografują
+            // i wysyłają — tam widniałaby nazwa konta w systemie.
+            validationMessage = "Saved and verified:\n\(url.path)"
             showExportResult(
                 title: "TD0 file saved",
-                message: "The copy was written and verified:\n\n\(url.path)"
+                message: "The copy was written and verified:\n\n\(url.lastPathComponent)"
             )
         } catch {
             validationMessage = "Export error: \(error.localizedDescription)"
             showExportResult(
                 title: "Could not save the file",
-                message: "\(error.localizedDescription)\n\nWybrana lokalizacja:\n\(url.path)"
+                message: "\(error.localizedDescription)\n\nFile: \(url.lastPathComponent)"
             )
         }
     }
@@ -158,6 +172,52 @@ final class TD0EditorModel: ObservableObject {
             guard (-64...64).contains(pan) else {
                 throw TD0Error.invalid("Invalid pan for zone \(index + 1)")
             }
+
+            // Suma MD5 w pliku TD0 mówi tylko tyle, że plik nie zepsuł się po
+            // drodze — nie mówi, kto go zrobił. Policzyć ją na spreparowanym
+            // pliku umie każdy. Bez sprawdzenia zakresów program pokazywałby
+            // więc zieloną plakietkę „MD5 OK" nad wartościami, których moduł
+            // nigdy by nie wystawił — a stąd już prosta droga przez „Save
+            // a copy" do wgrania tego komuś do TD-17.
+            let layerType = Int(data[mixer + 2])
+            let mainLevel = readInt16(data, at: main + 2)
+            let subLevel = readInt16(data, at: sub + 2)
+            guard (0...3).contains(layerType) else {
+                throw TD0Error.invalid("Invalid layer type in zone \(index + 1)")
+            }
+            guard (-601...60).contains(mainLevel),
+                  (-601...60).contains(subLevel)
+            else {
+                throw TD0Error.invalid("Level out of range in zone \(index + 1)")
+            }
+            let sends = [
+                readInt16(data, at: mixer + 12),
+                readInt16(data, at: mixer + 14),
+                readInt16(data, at: mixer + 16),
+            ]
+            // Zakres taki sam jak przy zapisie pliku (patrz
+            // `writeEditedValues`). Węższy — choćby zgodny z mapą SysEx —
+            // sprawiał, że program odrzucał **własny** plik: suwaki wysyłek
+            // w edytorze TD0 sięgają +6 dB, więc wystarczyło podnieść wysyłkę,
+            // zapisać kopię i otworzyć ją z powrotem. Twarde granice tak czy
+            // owak pilnuje ścieżka zapisu do modułu; tutaj chodzi o odsianie
+            // wartości, których w tym polu nie może być nigdy.
+            guard sends.allSatisfy({ (-601...60).contains($0) }) else {
+                throw TD0Error.invalid("Send level out of range in zone \(index + 1)")
+            }
+            let gains = [
+                Int(Int8(bitPattern: data[mixer + 6])),
+                Int(Int8(bitPattern: data[mixer + 9])),
+                Int(Int8(bitPattern: data[mixer + 11])),
+            ]
+            // Jak wyżej: zakres zgodny z tym, co zapisuje `writeEditedValues`.
+            // Pola wzmocnienia EQ w edytorze TD0 przyjmują całe -64…63,
+            // a walidacja zawężona do zakresu modułu odrzucała plik zapisany
+            // chwilę wcześniej przez ten sam program.
+            guard gains.allSatisfy({ (-64...63).contains($0) }) else {
+                throw TD0Error.invalid("EQ gain out of range in zone \(index + 1)")
+            }
+
             return TD0ZoneDraft(
                 index: index,
                 name: Self.zoneNames[index],
@@ -196,7 +256,13 @@ final class TD0EditorModel: ObservableObject {
         xStickVolume = readInt16(data, at: commonOffset + 4)
         crossStickEnabled = readUInt16(data, at: commonOffset + 6) != 0
         hiHatBalance = readInt16(data, at: commonOffset + 8)
-        midiNotes = (0..<24).map { readUInt16(data, at: midiOffset + $0 * 2) }
+        // 128 to „nuta wyłączona", więc górna granica jest o jeden wyższa niż
+        // najwyższa nuta MIDI.
+        let parsedNotes = (0..<24).map { readUInt16(data, at: midiOffset + $0 * 2) }
+        guard parsedNotes.allSatisfy({ (0...128).contains($0) }) else {
+            throw TD0Error.invalid("Invalid MIDI note assignment in the file")
+        }
+        midiNotes = parsedNotes
         zones = parsedZones
         supportsExpandedEffects = detectedV2
         if detectedV2 {
@@ -325,7 +391,9 @@ final class TD0EditorModel: ObservableObject {
             let subVEdit = subVEditOffset + zone.index * 40
             data[mixer] = UInt8(bitPattern: Int8(clamp(zone.pan, -64...64)))
             data[mixer + 1] = zone.subEnabled ? 1 : 0
-            data[mixer + 2] = UInt8(clamp(zone.layerType, 0...127))
+            // 0…3, tak samo jak przy wczytywaniu — inaczej zapis mógłby
+            // wyprodukować plik, którego program sam nie otworzy.
+            data[mixer + 2] = UInt8(clamp(zone.layerType, 0...3))
             data[mixer + 3] = UInt8(clamp(zone.fadePoint, 0...127))
             data[mixer + 4] = zone.eqEnabled ? 1 : 0
             data[mixer + 5] = UInt8(clamp(zone.eqLowFrequency, 0...127))
@@ -440,15 +508,29 @@ final class TD0EditorModel: ObservableObject {
         return String(format: "KIT-%03d", min(number + 1, 999))
     }
 
+    /// Doprowadza nazwę do postaci `COŚ.TD0`, ale **nigdy** kosztem pliku,
+    /// o który okno zapisu nie zapytało.
+    ///
+    /// Okno zapisu pyta o nadpisanie tylko tej ścieżki, którą pokazało
+    /// użytkownikowi. Każda inna, wyliczona już po jego kliknięciu, poszłaby
+    /// na dysk bez pytania — a `.atomic` nadpisuje bez mrugnięcia okiem. Dwa
+    /// konkretne przypadki: nazwa „.TD0" zostawiała pustą podstawę i wskazanie
+    /// przestawało być plikiem w wybranym katalogu, a na dysku wrażliwym na
+    /// wielkość liter „kit.td0" po cichu kasowało istniejące „kit.TD0".
     private func normalizedTD0URL(_ selectedURL: URL) -> URL {
         var baseName = selectedURL.deletingPathExtension().lastPathComponent
         while baseName.lowercased().hasSuffix(".td0") {
             baseName = String(baseName.dropLast(4))
         }
-        return selectedURL
+        guard !baseName.isEmpty else { return selectedURL }
+        let candidate = selectedURL
             .deletingLastPathComponent()
             .appendingPathComponent(baseName)
             .appendingPathExtension("TD0")
+        guard candidate == selectedURL
+            || !FileManager.default.fileExists(atPath: candidate.path)
+        else { return selectedURL }
+        return candidate
     }
 
     private func showExportResult(title: String, message: String) {

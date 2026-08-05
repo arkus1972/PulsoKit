@@ -1,14 +1,22 @@
 import Foundation
 
-/// Termin ważności wersji testowej.
+/// Termin ważności wersji testowej. **Wyłączony.**
 ///
-/// Uczciwie: to zabezpieczenie przed **przypadkiem**, a nie przed kimś, kto
-/// chce je obejść. Cofnięcie zegara systemowego jest wyłapywane (pamiętamy
+/// Cały mechanizm siedzi za `isEnabled`. Przy `false` program nie wygasa,
+/// nie ostrzega i **nie zapisuje niczego** w ustawieniach systemowych —
+/// `stampToday` też jest wtedy pusty. Kod zostaje na miejscu, bo włączenie
+/// z powrotem to zmiana jednej linii, a wycięcie go i przywrócenie za pół
+/// roku to przepisywanie czterech miejsc w interfejsie i jednego w wysyłce.
+///
+/// Gdyby kiedyś wrócił: to zabezpieczenie przed **przypadkiem**, a nie przed
+/// kimś, kto chce je obejść. Cofnięcie zegara jest wyłapywane (pamiętamy
 /// najpóźniejszą widzianą datę), ale ktoś zdeterminowany i tak sobie poradzi.
-/// Chodzi o to, żeby wersja rozdana znajomym sama się zamknęła, a nie o DRM.
 @MainActor
 enum AppExpiry {
-    /// Ostatni dzień działania — koniec 29 września 2026 czasu lokalnego.
+    /// Jedyny wyłącznik. `true` przywraca wygasanie w dniu `lastDay`.
+    static let isEnabled = false
+
+    /// Ostatni dzień działania, gdy `isEnabled` jest `true`.
     static let lastDay = DateComponents(year: 2026, month: 9, day: 29)
 
     /// Klucz, pod którym pamiętamy najpóźniejszą widzianą datę.
@@ -39,6 +47,8 @@ enum AppExpiry {
     /// Zapamiętuje dzisiejszą datę. Wołane z zegara raz na minutę, a nie
     /// z rysowania widoku.
     static func stampToday() {
+        // Przy wyłączonym terminie program nie zapisuje nic, nigdzie.
+        guard isEnabled else { return }
         let defaults = UserDefaults.standard
         let seen = defaults.object(forKey: seenKey) as? Date ?? .distantPast
         let now = Date()
@@ -48,7 +58,7 @@ enum AppExpiry {
     }
 
     static var hasExpired: Bool {
-        effectiveDate > deadline
+        isEnabled && effectiveDate > deadline
     }
 
     /// Ile dni zostało. Ujemne, gdy wersja już wygasła.
@@ -63,7 +73,7 @@ enum AppExpiry {
     /// Czy warto już ostrzegać. Dwa tygodnie wystarczą, żeby zdążyć się
     /// odezwać po nowszą wersję.
     static var shouldWarn: Bool {
-        !hasExpired && daysLeft <= 14
+        isEnabled && !hasExpired && daysLeft <= 14
     }
 
     static var formattedDeadline: String {

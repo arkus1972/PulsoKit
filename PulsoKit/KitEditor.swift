@@ -909,10 +909,11 @@ final class KitEditor: ObservableObject {
             values[.subLevel] = tenths(midi.subLevelDrafts[i])
             values[.subEnabled] = (midi.subEnabledDrafts[i] ?? false) ? 1 : 0
             values[.layerType] = midi.subLayerTypeDrafts[i] ?? 0
-            // Moduł zwraca Fade Point 0 dla warstw MIX i SWITCH, ale zapis
-            // ustawień warstwy przyjmuje dopiero 1. Bez tego podniesienia
-            // każde włączenie warstwy SUB na takim padzie było odrzucane.
-            values[.fadePoint] = max(1, midi.subFadePointDrafts[i] ?? 50)
+            // Bez podnoszenia do 1. Moduł trzyma tu 0 dla warstw MIX
+            // i SWITCH, a wymuszanie jedynki robiło z tego zmianę, której
+            // nikt nie zrobił — i którą zapis wysyłał przy okazji.
+            // Zapis przyjmuje teraz pełny zakres składowania.
+            values[.fadePoint] = midi.subFadePointDrafts[i] ?? 50
             values[.pan] = midi.panDrafts[i] ?? 0
             values[.ambienceSend] = midi.ambienceSendDrafts[i] ?? -601
             values[.mfxSend] = midi.mfxSendDrafts[i] ?? -601
@@ -1331,7 +1332,7 @@ final class KitEditor: ObservableObject {
             }
             midi.subEnabledDrafts[i] = layerValue(.subEnabled) != 0
             midi.subLayerTypeDrafts[i] = layerValue(.layerType)
-            midi.subFadePointDrafts[i] = max(1, layerValue(.fadePoint))
+            midi.subFadePointDrafts[i] = layerValue(.fadePoint)
         }
 
         for change in step.changes {

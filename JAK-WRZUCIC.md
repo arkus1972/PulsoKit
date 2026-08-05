@@ -9,7 +9,7 @@ Rozpakuj archiwum, wejdź do katalogu i:
 ```sh
 git init
 git branch -M main
-git remote add origin https://github.com/UŻYTKOWNIK/REPO.git
+git remote add origin https://github.com/arkus1972/PulsoKit.git
 git add -A
 git commit -m "PulsoKit v0.98 + kompilacja na GitHub Actions"
 git push -u origin main
@@ -78,7 +78,7 @@ Wystawi się Wydanie ze stałym adresem, który możesz wkleić w przycisk
 „Pobierz" na stronie:
 
 ```
-https://github.com/UŻYTKOWNIK/REPO/releases/latest/download/PulsoKit.zip
+https://github.com/arkus1972/PulsoKit/releases/latest/download/PulsoKit.zip
 ```
 
 Ten adres nigdy się nie zmienia — zawsze pokazuje najnowsze wydanie.

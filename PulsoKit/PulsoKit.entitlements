@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Piaskownica aplikacji. NIE JEST JESZCZE WŁĄCZONA — plik czeka gotowy,
+	  a instrukcja włączenia stoi w BEZPIECZENSTWO.md, w punkcie
+	  „Piaskownica”. Wymaga sprawdzenia z podłączonym TD-17, bo jedynym
+	  ryzykiem jest to, że moduł przestanie być widoczny.
+
+	  CoreMIDI działa w piaskownicy bez żadnego dodatkowego uprawnienia —
+	  nie istnieje coś takiego jak `com.apple.security.device.midi`.
+	  Wyjątkiem jest MIDI po Bluetooth, ale TD-17 jest tu na USB.
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+
+	<!--
+	  Pliki, które użytkownik sam wskaże w oknie otwierania lub zapisu.
+	  To jedyny sposób, w jaki program sięga po cokolwiek na dysku:
+	  pliki .TD0 i kopie zapasowe w JSON, zawsze przez NSOpenPanel
+	  albo NSSavePanel. Żadna ścieżka nie jest budowana samodzielnie,
+	  więc zmian w kodzie nie potrzeba.
+	-->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+</dict>
+</plist>
