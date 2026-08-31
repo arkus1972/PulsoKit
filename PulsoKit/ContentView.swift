@@ -299,6 +299,7 @@ struct ContentView: View {
             progress: midi.kitListProgress,
             scanning: midi.isScanningKitList,
             busy: midi.isOperationInProgress || midi.selectedOutputID == nil,
+            kitCount: midi.profile.kitCount,
             select: { midi.selectKit($0) },
             rescan: { midi.scanKitList() }
         )
@@ -1209,6 +1210,7 @@ private struct KitListMenu: View, Equatable {
             && lhs.progress == rhs.progress
             && lhs.scanning == rhs.scanning
             && lhs.busy == rhs.busy
+            && lhs.kitCount == rhs.kitCount
     }
 
     let names: [Int: String]
@@ -1217,15 +1219,21 @@ private struct KitListMenu: View, Equatable {
     let progress: Int
     let scanning: Bool
     let busy: Bool
+
+    /// Liczba kitów **przekazana wartością**, a nie wyciągana z `MIDIManager`.
+    /// Sięgnięcie tu po menedżera zabiłoby cały sens `Equatable`: menu
+    /// przeliczałoby się przy każdej porcji logu, budując sto przycisków
+    /// kilkadziesiąt razy w trakcie jednego odczytu.
+    let kitCount: Int
     let select: (Int) -> Void
     let rescan: () -> Void
 
     var body: some View {
         Menu {
-            if names.count < 100 {
+            if names.count < kitCount {
                 Text(
                     scanning
-                        ? "Reading kit list… \(progress)/100"
+                        ? "Reading kit list… \(progress)/\(kitCount)"
                         : "The kit list has not been loaded yet"
                 )
                 Button("Load kit list", action: rescan)
@@ -1234,7 +1242,7 @@ private struct KitListMenu: View, Equatable {
                 // Jedna płaska lista. macOS sam ją przewija, gdy nie mieści
                 // się na ekranie — podział na dziesiątki tylko wydłużał drogę
                 // do konkretnego kitu.
-                ForEach(1...midi.profile.kitCount, id: \.self) { number in
+                ForEach(1...max(1, kitCount), id: \.self) { number in
                     Button {
                         select(number)
                     } label: {
