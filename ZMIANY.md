@@ -1113,3 +1113,240 @@ zanim naciśniesz.
 Jeśli w trakcie próby kit na module się przełączy, komunikat po przeładowaniu
 mówi osobno, ile zmian przepadło **i** ile zostało wgranych w moduł — te
 wartości tam są, tylko program przestaje o nich wiedzieć.
+
+---
+
+# PulsoKit v0.99 — audyt bezpieczeństwa
+
+Pełny raport: `BEZPIECZENSTWO.md`. Poniżej sama lista zmian.
+
+## Ryzyko dla modułu i danych
+
+- **Szybki zapis kitu sprawdza teraz, czy bloki schodzą na kabel.** Przerwany
+  w połowie (kabel, wyłączony moduł, miniony termin) zatrzymuje się i mówi
+  wprost, że kit jest niekompletny. Wcześniej licznik dobiegał do końca,
+  a w module zostawał kit złożony z połowy starej i połowy nowej zawartości.
+- **Odwrócona kolejność przycisków w oknie potwierdzenia.** `NSAlert` robi
+  z pierwszego przycisku domyślny — odruchowe Enter nadpisywało cały kit.
+  Treść okna mówi teraz, że operacji nie da się cofnąć i że warto najpierw
+  wyeksportować kit.
+- **Przyciski przywracania wyłączone w trakcie każdej operacji**, plus drugi
+  warunek w modelu. Wcześniej wchodziły w środek serii z edytora, przez co
+  edytor meldował „moduł nie potwierdził" o zmianie, która doszła.
+- **Numer kitu z modułu ograniczony do 0…99**, w dwóch niezależnych miejscach:
+  przy odczycie i w funkcji budującej adres. Numer 128 dawał adres poza
+  obszarem kitów.
+- **Fade Point nie jest już podnoszony z 0 do 1.** Włączenie warstwy SUB na
+  padzie MIX/SWITCH zmieniało wartość, której nikt nie dotknął, i potrafiło
+  wywalić całą resztę serii na niezgodnej weryfikacji.
+- Zakresy V-Edit sprawdzane także przy szybkim zapisie migawki.
+- Powtórzone numery stref w sekcjach V-Edit migawki są odrzucane.
+
+## Pliki z zewnątrz
+
+- **Plik TD0 jest sprawdzany co do zakresów**, nie tylko co do sumy MD5. MD5
+  w tym formacie mówi tylko, że plik się nie zepsuł — policzyć ją na
+  spreparowanym pliku umie każdy.
+- Zakresy przy wczytywaniu zgodne z tym, co program sam zapisuje — inaczej
+  odrzucał własne pliki.
+- Zapis kopii TD0 nie może już trafić w plik, o który okno zapisu nie pytało.
+- Usunięte mapowanie pamięciowe pliku (obcięcie pliku w trakcie = śmierć
+  programu bez komunikatu), dodane sprawdzenie, że wskazano zwykły plik.
+- Limit rozmiaru migawki egzekwowany także przy samym czytaniu.
+
+## Odbiór MIDI
+
+- **Poprawiony odczyt poza buforem pakietu** — kod kopiował całą 256-bajtową
+  krotkę, a pakiety leżą w liście ciasno jeden za drugim. Przy okazji pakiety
+  dłuższe niż 256 bajtów nie gubią już reszty.
+- Ograniczona kolejka odbioru i bufor logu — gadatliwe źródło MIDI potrafiło
+  wyczerpać pamięć.
+- **Program nie podłącza się już sam do pierwszego portu z listy** (tylko gdy
+  jest dokładnie jeden), a Program Change jest honorowany dopiero po
+  rozpoznaniu modułu. Obce wejście potrafiło przestawić numer bieżącego kitu,
+  a z niego liczą się adresy zapisów.
+- Numer urządzenia zapamiętywany z pierwszej poprawnej odpowiedzi.
+- Opóźnienie przy burzy powiadomień CoreMIDI.
+- Sprawdzany wynik `MIDIPacketListAdd` — wiadomość, która się nie zmieściła,
+  była raportowana jako wysłana.
+
+## Interfejs
+
+- Pole poziomu w dB nie zabija już programu przy wpisaniu bardzo dużej liczby.
+- Uwaga nad przyciskiem „Copy log", że log zawiera nazwy urządzeń MIDI i kitów.
+- Ekran po wygaśnięciu nie twierdzi już, że nic nie zostało zmienione.
+
+## Rozdawanie i repozytorium
+
+- **Usunięte `xattr -cr` z instrukcji dla odbiorcy.** Uczyło odruchu, na którym
+  opierają się podrobione instalatory, i wyłączało sprawdzanie pliku przez
+  Gatekeeper w całości. Zamiast tego droga przez Ustawienia systemowe.
+- **Poświadczenie pochodzenia z GitHuba** i suma kontrolna przy każdym Wydaniu
+  — jedyny sposób, w jaki odbiorca może sprawdzić, że plik jest od Ciebie.
+  Podpis ad-hoc tego nie dowodzi.
+- **Licencja MIT** z wyłączeniem gwarancji, zastrzeżenie po polsku w README,
+  informacja o braku związku z Rolandem.
+- Uprawnienia workflow domyślnie tylko do odczytu, token nie zostaje
+  w `.git/config` na czas kompilacji, akcje przypięte do commitów.
+- Nazwa konta w systemie usunięta z nagłówków plików i z okien zapisu.
+
+## Przygotowane, ale nie włączone
+
+`PulsoKit/PulsoKit.entitlements` — piaskownica aplikacji. Kod nie wymaga
+żadnych zmian, ale jedynym ryzykiem jest to, że moduł przestanie być widoczny,
+a tego nie sprawdzi kompilator. Instrukcja włączenia i lista testów:
+`BEZPIECZENSTWO.md`, sekcja „Czego świadomie NIE zrobiłem".
+
+---
+
+# PulsoKit v1.0 — bez terminu ważności
+
+Program **nie wygasa**. Numer wersji idzie na 1.0, bo to była jedyna rzecz,
+która robiła z niego wersję testową.
+
+Mechanizm nie został wycięty, tylko zgaszony — w `AppExpiry.swift`:
+
+```swift
+static let isEnabled = false
+```
+
+Przy `false` nie ma ekranu wygaśnięcia, nie ma paska z licznikiem dni i nie ma
+blokady wysyłki. Zmiana na `true` przywraca wszystko, z datą z wiersza obok.
+Kod zostaje, bo przywrócenie to jedna linia, a wycięcie i odtworzenie za pół
+roku to przepisywanie czterech miejsc w interfejsie i jednego w wysyłce.
+
+Efekt uboczny na plus: **program nie zapisuje już niczego w ustawieniach
+systemowych.** Wcześniej trzymał tam jedną datę, na potrzeby wykrywania
+cofniętego zegara. Teraz jedyne, co zapisuje na dysk, to pliki, o które go
+wprost poprosisz.
+
+Zegar odmierzający minuty w interfejsie też przestał chodzić — przy wyłączonym
+terminie przeliczałby widok co minutę bez powodu.
+
+Zaktualizowane: `README.md`, `BUILD-I-ROZDANIE.md`, `BEZPIECZENSTWO.md`
+i strona `index.html` — nigdzie nie ma już mowy o dacie 29 września.
+
+---
+
+# PulsoKit v1.1 — jedna aplikacja, dwa moduły
+
+Program rozpoznaje teraz, **który moduł się zgłosił**, i dostosowuje się do
+niego sam. Bez osobnej wersji, bez przełącznika w menu.
+
+## Profile modułów
+
+Wszystko, czym jeden moduł różni się od drugiego, wyprowadzone z kodu do
+`ModuleProfile.swift`: identyfikator modelu, adres obszaru kitów, odstęp
+między kitami, liczba kitów, nazwy stref, liczba wejść triggerowych.
+
+Rozmowa z modułem — RQ1, DT1, suma kontrolna, adresy w bazie 128, weryfikacja
+każdego zapisu — zostaje ta sama dla całej rodziny V-Drums. Różni się **mapa**,
+nie maszyneria. Dołożenie kolejnego modułu to teraz dopisanie danych.
+
+## TD-27 — rozpoznawany, tylko do odczytu
+
+Struktura okazała się bliźniacza: te same RQ1/DT1, ta sama arytmetyka adresów,
+ten sam odstęp między kitami, tyle samo kitów. Różnice: identyfikator modelu
+`00 00 00 63`, obszar kitów przesunięty na `04 00 00 00` (pod `03` TD-27 trzyma
+SetList, czego TD-17 nie ma), dwanaście wejść i dwadzieścia cztery strefy.
+
+**Ale układ parametrów wewnątrz kitu nie jest jeszcze odwzorowany**, a mapa
+z dokumentacji nie została potwierdzona na żywym sprzęcie. Dlatego jeden
+przełącznik w profilu — `hasVerifiedMap` — wyłącza przy TD-27:
+
+- **zapis**, w `sendDT1`, czyli w jedynym miejscu, którym cokolwiek wychodzi
+  do pamięci modułu,
+- **odczyt strukturalny**, bo czytanie kitu adresami z innego modułu daje
+  śmieci, a śmieci pokazane jako wartości parametrów są gorsze niż uczciwe
+  „nie wiem".
+
+W pasku połączenia świeci pomarańczowa plakietka **TD-27 · READ ONLY**.
+
+## Sonda obszaru kitu
+
+Nowy przycisk **Probe kit area** w zakładce Log: zrzuca surowe bajty jednego
+kitu do logu. Tą samą drogą powstała mapa triggerów TD-17 — pytamy o kolejne
+kawałki, wypisujemy szesnastkowo i porównujemy z tym, co moduł pokazuje na
+swoim ekranie.
+
+Sonda działa także wtedy, gdy numer bieżącego kitu jest nieznany (bierze
+wtedy kit 1), przerywa się przyciskiem Stop, i sama się poddaje po stu
+pytaniach bez odpowiedzi zamiast blokować program na cztery minuty.
+
+## Poprawki wychwycone przy okazji
+
+- **Profil wybierany po *wybranych* portach**, nie po pierwszym pasującym
+  urządzeniu w systemie. Przy TD-17 i TD-27 wpiętych naraz ta różnica decyduje
+  o tym, czy program pisze tam, gdzie myśli.
+- **Powiadomienie o zmianie urządzeń nie przepada**, gdy przyjdzie w trakcie
+  operacji — jest ponawiane. Podmiana modułu podczas odczytu zostawiała
+  wcześniej profil poprzedniego.
+- **Zmiana modułu czyści cały stan** poprzedniego i gasi jego uzbrojone
+  zadania. Zostawione drafty potrafiły uzbroić warunki wstępne zapisu
+  wartościami z innego instrumentu.
+- **Zrzut ustawień sprząta po sobie na każdym wyjściu.** Przerwanie w środku
+  zostawiało flagę „coś trwa" podniesioną do końca życia programu.
+- Granice numeru kitu, liczba wejść triggerowych i lista kitów w menu biorą
+  się teraz z profilu, nie z wpisanych na sztywno setek.
+- Napisy w interfejsie mówią o „module", a nie o TD-17 na sztywno.
+
+---
+
+# PulsoKit v1.2 — widać, który bęben gra
+
+Odsłuch idzie na słuchawki albo do monitorów, a program milczy — do tej pory
+nie było jak sprawdzić, czy usłyszany dźwięk to na pewno ten pad, o który
+chodziło. Zwłaszcza przy „Play kit", gdzie zestaw leci sam, i przy padach
+z kilkoma strefami.
+
+Teraz każda nuta wysłana przez odsłuch zapala pad na scenie: rozbłysk
+w kolorze akcentu, szybkie zapalenie (0,06 s) i wolniejsze gaśnięcie
+(0,34 s), więc przy przesłuchiwaniu całego zestawu widać wędrówkę po padach.
+
+Obok tego dwie rzeczy, których sam rozbłysk pada nie załatwia:
+
+- **Obwódka pastylki strefy** — werbel to naciąg i obręcz, ride nawet trzy
+  strefy, a obręcze i AUX nie mają na zdjęciu własnego kształtu. Pastylka
+  mówi dokładnie, **która** strefa zabrzmiała.
+- **Nazwa strefy w dolnym pasku**, obok przycisku „Play kit". Stała
+  szerokość pola, żeby pasek nie skakał przy każdym uderzeniu. Nazwy biorą
+  się z profilu modułu, więc TD-27 pokaże swoje.
+
+## Szczegóły, które mają znaczenie
+
+- Podświetlenie zapala się **tylko wtedy, gdy nuta faktycznie zeszła na
+  kabel**. `playNote` zwraca teraz, czy się udało; przy braku wybranego
+  wyjścia albo przy zablokowanej wysyłce pad nie mruga. Świecący pad przy
+  ciszy w słuchawkach byłby gorszy od braku podświetlenia.
+- **Wyciszona strefa nie świeci** — ani na scenie, ani na pastylce. Skoro
+  moduł jej nie zagra, program nie ma czego pokazywać.
+- Gaśnięcie kasuje **wyłącznie własne** podświetlenie: jeśli w międzyczasie
+  zabrzmiał następny pad, jego rozbłysk zostaje.
+- **Stop** gasi wszystko natychmiast, razem z uzbrojonym zadaniem gaszenia.
+- Warstwa rozbłysku nie przechwytuje kliknięć — leży pod polami trafienia,
+  więc klikanie padów działa dokładnie jak wcześniej.
+
+## Poprawki wychwycone przy okazji
+
+- **Wysyłka nuty mówi prawdę o tym, czy poszła.** `sendRaw` zwracał „gotowe"
+  nawet wtedy, gdy `MIDIPacketListAdd` odmówił albo `MIDISend` zwrócił błąd —
+  wynik `MIDISend` był po prostu wyrzucany. Bez tego cała reguła „pad świeci
+  tylko wtedy, gdy nuta zeszła na kabel" byłaby pusta.
+- **„Undo in module" przestało być martwe w trakcie odsłuchu próby.** Guzik
+  pytał o `isOperationInProgress`, a to zawiera odsłuch — który startuje zaraz
+  po „Try it". Przez kilka sekund, dokładnie wtedy, gdy się słucha zmiany
+  i chce ją cofnąć, przycisk był wyszarzony. Teraz pyta o samą rozmowę SysEx,
+  a powrót po drodze zatrzymuje odsłuch, żeby nie grał po wartościach,
+  których już w module nie ma.
+- **Zamknięcie nuty nie wpada już w środek ramki SysEx.** `note off` szedł
+  120 ms po nucie, z uśpionego zadania, z pominięciem wszystkich strażników.
+  Gdy w tym czasie ruszała rozmowa z modułem, bajt nuty wracał echem przez
+  Soft Thru w środek ramki i zrywał odbiór — wyglądało to jak brak odpowiedzi
+  z modułu, z ośmiosekundowym czekaniem i komunikatem o niepotwierdzonym
+  zapisie, choć zapis doszedł. Teraz zamknięcia czekają w kolejce i są
+  wypychane **przed** każdą ramką SysEx, a „Stop" domyka je natychmiast.
+- **Nazwy stref na pastylkach biorą się z profilu modułu**, nie z wpisanego na
+  sztywno katalogu TD-17 — inaczej pasek i pastylka mówiłyby przy TD-27
+  o tej samej strefie dwie różne rzeczy.
+- **„Play kit" bierze liczbę stref z profilu** zamiast wpisanych na sztywno
+  dwudziestu. TD-27 ma ich 24.
