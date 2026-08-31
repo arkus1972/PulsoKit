@@ -283,6 +283,20 @@ jobs:
           # `gh` jest na runnerze fabrycznie — bez dokładania cudzych akcji.
           # Gdy Wydanie dla tego tagu już istnieje (np. przy powtórce
           # przebiegu), podmieniamy w nim plik zamiast wywalać się na błędzie.
+          # Tag z myślnikiem — v1.1-beta, v1.2-rc1 — to wydanie próbne.
+          # Dostaje znacznik pre-release, przez co **nie staje się „latest"**:
+          # przycisk „Download" na stronie dalej podaje ostatnią zwykłą wersję,
+          # a próbną dostaje tylko ten, komu wyślesz link wprost.
+          #
+          # To jest bezpiecznik, nie wygoda. Bez niego wystarczyło raz wysłać
+          # tag inaczej, niż się planowało, żeby wersja testowa wylądowała
+          # u wszystkich, którzy mają link do strony.
+          PRERELEASE=""
+          case "$TAG" in
+            *-*) PRERELEASE="--prerelease"
+                 echo "::notice::$TAG wygląda na wersję próbną — pre-release" ;;
+          esac
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" \
               PulsoKit.zip PulsoKit.zip.sha256 --clobber
@@ -290,6 +304,7 @@ jobs:
             gh release create "$TAG" \
               PulsoKit.zip PulsoKit.zip.sha256 \
               --target "$GITHUB_SHA" \
+              $PRERELEASE \
               --title "PulsoKit $TAG" \
               --notes "Zbudowane automatycznie z commita \`$GITHUB_SHA\`.
 
