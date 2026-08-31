@@ -952,12 +952,32 @@ final class MIDIManager: ObservableObject {
         let data: [UInt8]
     }
 
-    private let zoneNames = TD17ZoneCatalog.names
+    private var zoneNames: [String] { profile.zoneNames }
 
-    var td17Detected: Bool {
-        (inputs + outputs).contains {
-            $0.name.localizedCaseInsensitiveContains("TD-17")
-        }
+    /// Czy któryś z portów w systemie wygląda na znany nam moduł.
+    ///
+    /// Nazwa została (`td17Detected`), bo używa jej kilkanaście miejsc,
+    /// ale warunek dotyczy teraz każdego profilu z listy.
+    var td17Detected: Bool { anyKnownModulePresent }
+
+    /// Profil rozpoznany po **wybranych** portach.
+    ///
+    /// Celowo nie po pierwszym pasującym urządzeniu w systemie. Bajty idą na
+    /// wybrane wyjście, więc to ono decyduje, z jakim modułem rozmawiamy.
+    /// Przy TD-17 i TD-27 wpiętych naraz różnica między jednym a drugim to
+    /// różnica między zapisem tam, gdzie trzeba, a zapisem do cudzego
+    /// instrumentu adresami z niewłaściwej mapy.
+    private var detectedProfileFromPortNames: ModuleProfile? {
+        ModuleProfile.matching(
+            outputName: outputs.first { $0.id == selectedOutputID }?.name,
+            inputName: inputs.first { $0.id == selectedInputID }?.name
+        )
+    }
+
+    /// Czy w systemie widać jakikolwiek znany moduł — niezależnie od wyboru.
+    /// Używane tylko do zapalenia „wykryto", nigdy do adresowania.
+    private var anyKnownModulePresent: Bool {
+        (inputs + outputs).contains { ModuleProfile.matching(portName: $0.name) != nil }
     }
 
     /// Roland odpowiedział na zapytanie o tożsamość.
@@ -966,6 +986,11 @@ final class MIDIManager: ObservableObject {
     /// przez zwykły interfejs MIDI, ma port nazwany po interfejsie i program
     /// twierdziłby, że nie widzi modułu — mimo że wszystko działa.
     @Published private(set) var rolandIdentityDetected = false
+
+    /// Moduł, z którym rozmawiamy. Domyślnie TD-17 — jedyny sprawdzony na
+    /// sprzęcie. Zmienia się po rozpoznaniu portu albo po odpowiedzi
+    /// Identity Reply.
+    @Published private(set) var profile: ModuleProfile = .td17
 
     private var deviceRefreshTask: Task<Void, Never>?
 
@@ -985,6 +1010,9 @@ final class MIDIManager: ObservableObject {
             self.refreshDevices()
         }
     }
+
+    /// Czy czeka nieobsłużone powiadomienie o zmianie urządzeń.
+    private var pendingDeviceRefresh = false
 
     /// Numer urządzenia z pierwszej przyjętej odpowiedzi DT1.
     ///
@@ -1010,7 +1038,8 @@ final class MIDIManager: ObservableObject {
         // wejście z TD-17 i wyjście z innego interfejsu to dokładnie ten
         // przypadek, przed którym ten warunek ma chronić.
         return names.allSatisfy {
-            $0?.localizedCaseInsensitiveContains("TD-17") == true
+            guard let name = $0 else { return false }
+            return name.localizedCaseInsensitiveContains(profile.portKeyword)
         }
     }
 
@@ -1018,13 +1047,6 @@ final class MIDIManager: ObservableObject {
         isBusyWithSysEx || isAuditioningKit
     }
 
-    /// Trwa rozmowa SysEx z modułem.
-    ///
-    /// Osobno od `isOperationInProgress`, bo odsłuch **też** ma wstrzymywać
-    /// resztę programu — odroczony odczyt kitu nie ma prawa wejść w środek
-    /// grania, bo echo nuty rozwala niedokończoną ramkę. Ale sam odsłuch musi
-    /// mieć czym wysyłać: gdyby nuty pytały o `isOperationInProgress`,
-    /// pierwsza z nich zablokowałaby wszystkie następne.
     /// Czy wolno rozpocząć pojedyncze przywrócenie z kopii.
     ///
     /// Samo `!isWriting` nie wystarczało. Między dwoma krokami serii z edytora
@@ -1051,6 +1073,13 @@ final class MIDIManager: ObservableObject {
     /// Trwa szybki zapis całego kitu (seria bloków bez weryfikacji każdego).
     private var isFastWriting = false
 
+    /// Trwa rozmowa SysEx z modułem.
+    ///
+    /// Osobno od `isOperationInProgress`, bo odsłuch **też** ma wstrzymywać
+    /// resztę programu — odroczony odczyt kitu nie ma prawa wejść w środek
+    /// grania, bo echo nuty rozwala niedokończoną ramkę. Ale sam odsłuch musi
+    /// mieć czym wysyłać: gdyby nuty pytały o `isOperationInProgress`,
+    /// pierwsza z nich zablokowałaby wszystkie następne.
     var isBusyWithSysEx: Bool {
         isWriting || isReadingKit || isBatchRestoring || isEditorSending
             || isScanningKitList || isDumpingSetup || isReadingTriggers
@@ -1073,6 +1102,51 @@ final class MIDIManager: ObservableObject {
 
     /// Trwa przesłuchiwanie całego zestawu pad po padzie.
     @Published private(set) var isAuditioningKit = false
+
+    /// Strefa, która **właśnie zabrzmiała** — do podświetlenia na scenie.
+    ///
+    /// Przy odsłuchu na słuchawkach dźwięk wychodzi z modułu, a program nie ma
+    /// jak go usłyszeć. Wie za to dokładnie, którą nutę przed chwilą wysłał —
+    /// i to wystarczy, żeby pokazać, co słychać.
+    ///
+    /// Ustawiane **tylko wtedy, gdy nuta faktycznie zeszła na kabel**.
+    /// Podświetlenie pada, który nie zagrał, byłoby gorsze od jego braku:
+    /// człowiek słyszy ciszę i widzi, że coś gra.
+    @Published private(set) var nowPlayingZone: Int?
+
+    private var nowPlayingTask: Task<Void, Never>?
+
+    /// Nazwa strefy, która właśnie zabrzmiała — do pokazania w pasku.
+    ///
+    /// Nazwy bierzemy z profilu, bo TD-27 ma inny zestaw stref niż TD-17.
+    var nowPlayingZoneName: String? {
+        guard let zone = nowPlayingZone,
+              profile.zoneNames.indices.contains(zone) else { return nil }
+        return profile.zoneNames[zone]
+    }
+
+    /// Zapala podświetlenie strefy i gasi je po chwili.
+    ///
+    /// Czas dobrany tak, żeby przy przesłuchiwaniu całego zestawu (krok co
+    /// 420 ms) podświetlenie gasło tuż przed zapaleniem następnego — widać
+    /// wtedy wędrówkę po padach, a nie stale zapalony jeden.
+    ///
+    /// Celowo dłużej niż 120 ms do `note off`: bęben wybrzmiewa po zamknięciu
+    /// nuty, więc podświetlenie ma iść za **dźwiękiem**, a nie za komunikatem.
+    /// Przy krótkich brzmieniach (cross stick, zamknięty hi-hat) pad świeci
+    /// przez chwilę po ucichnięciu i tak ma być — skracanie tego psuje
+    /// czytelność przesłuchania.
+    private func flagPlaying(_ zoneIndex: Int) {
+        nowPlayingZone = zoneIndex
+        nowPlayingTask?.cancel()
+        nowPlayingTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(360))
+            guard let self, !Task.isCancelled else { return }
+            // Gasimy wyłącznie **własne** podświetlenie. W międzyczasie mógł
+            // zabrzmieć następny pad i to jego nie wolno zgasić.
+            if self.nowPlayingZone == zoneIndex { self.nowPlayingZone = nil }
+        }
+    }
 
     private var auditionTask: Task<Void, Never>?
     private var auditionGeneration = 0
@@ -1135,9 +1209,27 @@ final class MIDIManager: ObservableObject {
 
     func refreshDevices() {
         guard !isOperationInProgress else {
-            appendLog("Wait for the current MIDI operation to finish")
+            // Jedna linia na oczekiwanie, nie jedna na próbę. Ponawianie co
+            // 200 ms przez czterominutową sondę to tysiąc identycznych linii,
+            // które wypychają z logu dokładnie te bajty, po które sonda
+            // została uruchomiona.
+            if !pendingDeviceRefresh {
+                appendLog("Device change noticed — will refresh when free")
+            }
+            pendingDeviceRefresh = true
+            // Ponawiamy, zamiast gubić: podmiana modułu w trakcie odczytu
+            // zostawiłaby profil poprzedniego na zawsze, a to jest dokładnie
+            // ten stan, w którym program pisze nie tam, gdzie myśli.
+            deviceRefreshTask?.cancel()
+            deviceRefreshTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                self.deviceRefreshTask = nil
+                self.refreshDevices()
+            }
             return
         }
+        pendingDeviceRefresh = false
 
         let previousInput = selectedInputID
         let previousOutput = selectedOutputID
@@ -1168,6 +1260,44 @@ final class MIDIManager: ObservableObject {
             ?? td17Endpoint(in: outputs)?.id
             ?? (outputs.count == 1 ? outputs.first?.id : nil)
 
+        // Przełączenie profilu, gdy po drugiej stronie jest inny moduł.
+        // Idzie **wyłącznie** po nazwie portu, bo tylko ona jest pewna:
+        // kodów rodziny i modelu z Identity Reply nie mamy potwierdzonych
+        // dla żadnego z tych modułów, a zgadywanie na ich podstawie
+        // przestawiłoby adresy zapisu na chybił trafił.
+        if let detected = detectedProfileFromPortNames, detected != profile {
+            appendLog(
+                "Module changed: \(profile.displayName) → \(detected.displayName)"
+                    + (detected.hasVerifiedMap
+                        ? ""
+                        : " — read only, address map not verified yet")
+            )
+            profile = detected
+            initialReadDone = false
+            kitListScanDone = false
+            moduleDeviceID = nil
+            // Wszystko, co opisywało poprzedni moduł, musi zniknąć. Dane
+            // z TD-17 pokazane pod nagłówkiem TD-27 wprowadzają w błąd,
+            // a zostawione drafty potrafią uzbroić warunki wstępne zapisu
+            // wartościami wziętymi z zupełnie innego instrumentu.
+            resetKitState()
+            kitNames = [:]
+            triggers = []
+            triggerCommon = nil
+            isReadingKit = false
+            readPhase = .idle
+            // Zadania uzbrojone dla poprzedniego modułu śpią i przez to nie
+            // liczą się jako trwająca operacja. Obudzone po podmianie
+            // poszłyby czytać nowy moduł mapą starego.
+            automaticKitReadTask?.cancel()
+            deferredFullReadTask?.cancel()
+            kitListScanTask?.cancel()
+            initialReadTask?.cancel()
+            probeTask?.cancel()
+            needsKitReconcile = false
+            kitListProgress = 0
+        }
+
         connectSelectedInput()
 
         // Wypięcie modułu odblokowuje jednorazowy automat, żeby po ponownym
@@ -1182,7 +1312,17 @@ final class MIDIManager: ObservableObject {
         }
         moduleWasAvailable = td17Detected
 
-        status = moduleAvailable ? "TD-17 detected" : "TD-17 not detected"
+        // Nazwę modułu podajemy tylko wtedy, gdy wynika z **wybranych**
+        // portów. Inaczej przy TD-27 na magistrali i niewybranym wyjściu
+        // nagłówek meldowałby „TD-17 detected" — czyli dokładnie to
+        // pomylenie, przed którym broni rozpoznawanie po wyborze.
+        if detectedProfileFromPortNames != nil {
+            status = "\(profile.displayName) detected"
+        } else if anyKnownModulePresent {
+            status = "Module detected — select the input and output"
+        } else {
+            status = "No module detected"
+        }
         appendLog("Refreshed: \(inputs.count) inputs, \(outputs.count) MIDI outputs")
         scheduleInitialKitRead()
 
@@ -1289,11 +1429,13 @@ final class MIDIManager: ObservableObject {
     /// przy uderzeniu pałką.
     func playZone(_ zoneIndex: Int) {
         guard let note = auditionNote(forZone: zoneIndex) else { return }
-        playNote(note)
+        if playNote(note) { flagPlaying(zoneIndex) }
     }
 
-    func playNote(_ note: Int) {
-        guard (0...127).contains(note) else { return }
+    /// Zwraca `true`, gdy nuta naprawdę wyszła na kabel.
+    @discardableResult
+    func playNote(_ note: Int) -> Bool {
+        guard (0...127).contains(note) else { return false }
         let channel = UInt8(max(1, min(16, auditionChannel)) - 1)
         let velocity = UInt8(max(1, min(127, auditionVelocity)))
 
@@ -1301,19 +1443,42 @@ final class MIDIManager: ObservableObject {
         // Inaczej po terminie ważności albo w środku odczytu z programu
         // wychodziłby sam `note off` — bajt na kablu z aplikacji, która
         // właśnie miała milczeć.
-        guard sendShort([0x90 | channel, UInt8(note), velocity]) else { return }
+        guard sendShort([0x90 | channel, UInt8(note), velocity]) else { return false }
 
         // Bęben wybrzmiewa sam, ale nuta bez zamknięcia zostawia w module
         // wiszący dźwięk — przy hi-hacie słychać to od razu. Zamknięcie idzie
         // do **tego samego** wyjścia i z pominięciem strażników: nuta już
         // poszła, więc jej niezamknięcie jest gorsze od każdego powodu,
         // dla którego mielibyśmy tego nie wysłać.
-        let destination = outputs.first { $0.id == selectedOutputID }?.reference
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard let self, let destination else { return }
-            self.sendRaw([0x80 | channel, UInt8(note), 0], to: destination)
+        //
+        // Zamknięcie czeka w kolejce, a nie tylko w uśpionym zadaniu: gdy
+        // w tych 120 ms ruszy rozmowa SysEx, musimy je wypchnąć **przed** nią.
+        // Bajt nuty, który wróci echem przez Soft Thru w środek ramki, zrywa
+        // odbiór — a wyglądało to jak brak odpowiedzi z modułu.
+        if let destination = outputs.first(where: { $0.id == selectedOutputID })?.reference {
+            pendingNoteOffs.append((bytes: [0x80 | channel, UInt8(note), 0],
+                                    destination: destination))
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(120))
+                self?.flushPendingNoteOffs()
+            }
         }
+        return true
+    }
+
+    /// Nuty czekające na swoje zamknięcie.
+    private var pendingNoteOffs: [(bytes: [UInt8], destination: MIDIEndpointRef)] = []
+
+    /// Domyka wszystkie nuty, które jeszcze czekają na `note off`.
+    ///
+    /// Wołane po upływie czasu wybrzmienia **i** przed każdą ramką SysEx.
+    /// Kolejka jest czyszczona przed wysyłką, więc powtórne wywołanie nie
+    /// wyśle niczego dwa razy.
+    private func flushPendingNoteOffs() {
+        guard !pendingNoteOffs.isEmpty else { return }
+        let queued = pendingNoteOffs
+        pendingNoteOffs.removeAll()
+        for item in queued { sendRaw(item.bytes, to: item.destination) }
     }
 
     /// Przesłuchuje cały zestaw, pad po padzie.
@@ -1322,7 +1487,9 @@ final class MIDIManager: ObservableObject {
             cancelAudition()
             return
         }
-        auditionZones(Array(0..<20))
+        // Liczba stref z profilu, nie wpisane na sztywno 20: TD-27 ma ich 24
+        // i przy nim pętla urywałaby się przed końcem zestawu.
+        auditionZones(Array(profile.zoneNames.indices))
     }
 
     /// Gra po kolei wskazane strefy.
@@ -1361,6 +1528,8 @@ final class MIDIManager: ObservableObject {
             // zadania zatrzymałoby dopiero co rozpoczęte.
             guard let self, self.auditionGeneration == generation else { return }
             self.isAuditioningKit = false
+            // Ostatni pad zdąży się jeszcze pokazać — `flagPlaying` zgasi go
+            // sam po swoim czasie.
         }
     }
 
@@ -1369,6 +1538,12 @@ final class MIDIManager: ObservableObject {
         auditionTask?.cancel()
         auditionTask = nil
         isAuditioningKit = false
+        nowPlayingTask?.cancel()
+        nowPlayingTask = nil
+        nowPlayingZone = nil
+        // Ostatnia nuta ma zostać domknięta od razu, a nie dopiero po swoich
+        // 120 ms — „Stop" ma uciszać, a nie zostawiać wiszący dźwięk.
+        flushPendingNoteOffs()
     }
 
     /// Krótka wiadomość kanałowa — trzy bajty, bez SysEx.
@@ -1389,12 +1564,16 @@ final class MIDIManager: ObservableObject {
             let destination = outputs.first(where: { $0.id == selectedOutputID })
         else { return false }
 
-        sendRaw(bytes, to: destination.reference)
-        return true
+        return sendRaw(bytes, to: destination.reference)
     }
 
     /// Trzy bajty prosto do wskazanego wyjścia, bez żadnych warunków.
-    private func sendRaw(_ bytes: [UInt8], to destination: MIDIEndpointRef) {
+    ///
+    /// Zwraca, czy pakiet **naprawdę** poszedł. Odsłuch po tym pozna, czy
+    /// wolno zapalić pad: rozbłysk przy ciszy w słuchawkach jest gorszy niż
+    /// jego brak.
+    @discardableResult
+    private func sendRaw(_ bytes: [UInt8], to destination: MIDIEndpointRef) -> Bool {
         var packetList = MIDIPacketList()
         let packet = MIDIPacketListInit(&packetList)
 
@@ -1410,8 +1589,8 @@ final class MIDIManager: ObservableObject {
                 base
             ) != nil
         }
-        guard added else { return }
-        MIDISend(outputPort, destination, &packetList)
+        guard added else { return false }
+        return MIDISend(outputPort, destination, &packetList) == noErr
     }
 
     // MARK: - Ustawienia triggerów
@@ -1425,6 +1604,14 @@ final class MIDIManager: ObservableObject {
     /// **Wyłącznie odczyt.** Zapis dochodzi dopiero wtedy, gdy wartości na
     /// ekranie programu zgodzą się co do liczby z tym, co pokazuje moduł.
     func readTriggerSettings() {
+        guard profile.hasVerifiedMap else {
+            appendLog(
+                "\(profile.displayName): address map not verified — "
+                    + "this is read only. Use “Probe kit area” in the Log tab."
+            )
+            status = "\(profile.displayName): read only"
+            return
+        }
         guard !isOperationInProgress else {
             appendLog("Wait for the current MIDI operation to finish")
             return
@@ -1497,6 +1684,122 @@ final class MIDIManager: ObservableObject {
     /// odpowiedzi z tym, co moduł pokazuje na swoim ekranie.
     ///
     /// To **wyłącznie odczyt**. Nic tu nie zapisuje.
+    /// Zrzut surowych bajtów z obszaru **jednego kitu**.
+    ///
+    /// Do rozpoznania układu pamięci nieznanego modułu. Dokładnie tą drogą
+    /// powstała mapa triggerów TD-17: prosimy o kolejne kawałki, wypisujemy
+    /// je szesnastkowo do logu i porównujemy z tym, co moduł pokazuje na
+    /// swoim ekranie. Zgadywanie offsetów z dokumentacji daje mapę, której
+    /// nikt nie potwierdził — a pod niepotwierdzony adres nie wolno pisać.
+    ///
+    /// **Wyłącznie odczyt.** Nie wysyła ani jednego DT1.
+    func probeKitArea() {
+        guard !isOperationInProgress else {
+            appendLog("Wait for the current MIDI operation to finish")
+            return
+        }
+        guard selectedOutputID != nil else {
+            appendLog("No MIDI output selected")
+            return
+        }
+        // Przy nieznanej mapie numer bieżącego kitu też jest nieznany —
+        // odczyt strukturalny jest wtedy wyłączony. Sonda jest jedynym
+        // narzędziem, jakie zostaje, więc nie może od niego zależeć: bez
+        // numeru bierzemy kit 1, czyli sam początek obszaru.
+        let kitNumber = currentKitNumber ?? 1
+        let base = kitAddress(kitIndex: kitNumber - 1)
+        isDumpingSetup = true
+        setupDumpActive = true
+        status = "Probing the kit area…"
+        appendLog(
+            "KIT PROBE: \(profile.displayName), kit \(kitNumber)"
+                + (currentKitNumber == nil ? " (assumed)" : "")
+                + ", base \(hex(base)) — read only"
+        )
+
+        probeTask = Task { @MainActor [weak self] in
+            // Odstęp między kitami to 0x8000 w bazie 128; tyle wystarczy,
+            // żeby objąć cały jeden kit i nie wejść w następny.
+            let span = 0x8000
+            let chunk = 0x20
+            var answered = 0
+            var scanned = 0
+
+            // `defer` zamiast sprzątania na końcu pętli: przerwanie w środku
+            // — przyciskiem Stop, zniknięciem obiektu, czymkolwiek — musi
+            // opuścić obie flagi. Zostawiona `isDumpingSetup` znaczy, że
+            // program do końca swojego życia uważa, że coś trwa, i odmawia
+            // wszystkiego.
+            defer {
+                self?.setupDumpActive = false
+                self?.isDumpingSetup = false
+                self?.probeTask = nil
+            }
+
+            for offset in stride(from: 0, to: span, by: chunk) {
+                guard let manager = self,
+                      manager.setupDumpActive,
+                      !Task.isCancelled
+                else { break }
+
+                scanned += 1
+                manager.setupDumpReplied = false
+                manager.sendRQ1(
+                    address: manager.addBase128(
+                        base,
+                        offset: manager.encodeBase128(offset)
+                    ),
+                    size: manager.encodeBase128(chunk)
+                )
+                for _ in 0..<6 {
+                    try? await Task.sleep(for: .milliseconds(40))
+                    if manager.setupDumpReplied { break }
+                }
+                if manager.setupDumpReplied { answered += 1 }
+
+                // Nieznany obszar potrafi milczeć na wszystko. Po stu
+                // kolejnych pytaniach bez jednej odpowiedzi nie ma sensu
+                // trzymać programu przez następne cztery minuty.
+                if scanned >= 100, answered == 0 {
+                    manager.appendLog(
+                        "KIT PROBE: no reply to the first 100 requests — "
+                            + "the module does not expose this area, or the "
+                            + "base address is wrong. Stopping."
+                    )
+                    break
+                }
+
+                if scanned % 128 == 0 {
+                    manager.status =
+                        "Probing… \(scanned)/\(span / chunk), \(answered) answered"
+                }
+            }
+
+            guard let self else { return }
+            self.status = "Kit probe finished"
+            self.appendLog(
+                "KIT PROBE: finished, \(answered) of \(scanned) block(s) "
+                    + "answered. Copy the log and send it over."
+            )
+        }
+    }
+
+    /// Przerywa zrzut surowych bajtów — sondę albo zrzut ustawień.
+    ///
+    /// Obie operacje dzielą `setupDumpActive` i `isDumpingSetup`, więc
+    /// przerwanie musi gasić jedno i drugie niezależnie od tego, która
+    /// z nich trwa. Zostawiona flaga blokuje cały program.
+    func cancelProbe() {
+        probeTask?.cancel()
+        probeTask = nil
+        setupDumpActive = false
+        isDumpingSetup = false
+        status = "Stopped"
+        appendLog("Dump stopped by the user")
+    }
+
+    private var probeTask: Task<Void, Never>?
+
     func dumpModuleSetup() {
         guard !isOperationInProgress else {
             appendLog("Wait for the current MIDI operation to finish")
@@ -1527,15 +1830,24 @@ final class MIDIManager: ObservableObject {
             let chunk = 0x20
             var answered = 0
 
+            // Sprzątanie na każdym wyjściu, tak samo jak w sondzie. Bez tego
+            // przerwanie zrzutu w środku zostawiało `isDumpingSetup`
+            // podniesione na zawsze — a wtedy program do końca swojego życia
+            // uważa, że coś trwa, i odmawia wszystkiego.
+            defer {
+                self?.setupDumpActive = false
+                self?.isDumpingSetup = false
+            }
+
             for (root, span) in roots {
                 // Jedno rozpakowanie na pętlę: powtórne `guard let self`
                 // w środku dotyczyłoby już rozpakowanej wartości i nie
                 // przeszłoby kompilacji.
-                guard let manager = self, manager.setupDumpActive else { return }
+                guard let manager = self, manager.setupDumpActive else { break }
                 manager.appendLog("SETUP DUMP: block \(manager.hex(root))")
 
                 for offset in stride(from: 0, to: span, by: chunk) {
-                    guard manager.setupDumpActive else { return }
+                    guard manager.setupDumpActive, !Task.isCancelled else { break }
                     manager.setupDumpReplied = false
                     manager.sendRQ1(
                         address: manager.addBase128(
@@ -1559,8 +1871,6 @@ final class MIDIManager: ObservableObject {
             }
 
             guard let self else { return }
-            self.setupDumpActive = false
-            self.isDumpingSetup = false
             self.status = "Setup dump finished"
             self.appendLog(
                 "SETUP DUMP: finished, \(answered) block(s) answered"
@@ -1609,6 +1919,16 @@ final class MIDIManager: ObservableObject {
     /// hurtem. Watchdog jest ten sam co przy odczycie kitu, więc martwe łącze
     /// nie zawiesi tego na zawsze.
     func scanKitList() {
+        guard profile.hasVerifiedMap else {
+            // Zaznaczamy jako zrobione, żeby każde kolejne odświeżenie
+            // urządzeń nie zaczynało tego od nowa.
+            kitListScanDone = true
+            appendLog(
+                "\(profile.displayName): kit names cannot be read until the "
+                    + "address map is confirmed."
+            )
+            return
+        }
         guard !isOperationInProgress else {
             appendLog("Wait for the current MIDI operation to finish")
             return
@@ -1684,11 +2004,19 @@ final class MIDIManager: ObservableObject {
     ///
     /// Po potwierdzeniu leci pełny odczyt, bo w module stoi już inny kit.
     func selectKit(_ number: Int) {
+        guard profile.hasVerifiedMap else {
+            appendLog(
+                "\(profile.displayName): address map not verified — "
+                    + "this is read only. Use “Probe kit area” in the Log tab."
+            )
+            status = "\(profile.displayName): read only"
+            return
+        }
         guard !isOperationInProgress else {
             appendLog("Wait for the current MIDI operation to finish")
             return
         }
-        guard (1...100).contains(number) else { return }
+        guard (1...profile.kitCount).contains(number) else { return }
         guard number != displayedKitNumber else { return }
 
         // Odroczony odczyt poprzedniego wyboru jest już nieaktualny.
@@ -1751,17 +2079,13 @@ final class MIDIManager: ObservableObject {
         sendSysEx([0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7])
     }
 
-    func readCurrentKit() {
-        guard !isOperationInProgress else {
-            nextReadShouldBeQuick = false
-            appendLog("A read or write is already in progress")
-            return
-        }
-
-        readGeneration += 1
-        let generation = readGeneration
-        isQuickRead = nextReadShouldBeQuick
-        nextReadShouldBeQuick = false
+    /// Kasuje cały stan opisujący jeden kit.
+    ///
+    /// Wyciągnięte z `readCurrentKit`, bo potrzebuje tego również
+    /// przełączenie modułu: dane z TD-17 wyświetlone pod nagłówkiem TD-27
+    /// wprowadzają w błąd, a zostawione drafty potrafią uzbroić warunki
+    /// wstępne zapisu wartościami z **innego** modułu.
+    private func resetKitState() {
         currentKitNumber = nil
         currentKitName = nil
         zones = []
@@ -1823,6 +2147,33 @@ final class MIDIManager: ObservableObject {
         crossStickEnabledDraft = false
         hiHatBalanceDraft = 0
         midiNoteDrafts = [:]
+        pendingLayerCommon = nil
+    }
+
+    func readCurrentKit() {
+        guard !isOperationInProgress else {
+            nextReadShouldBeQuick = false
+            appendLog("A read or write is already in progress")
+            return
+        }
+        // Czytanie kitu adresami wziętymi z innego modułu daje śmieci,
+        // a śmieci pokazane jako wartości parametrów są gorsze niż uczciwe
+        // „nie wiem". Od poznania nieznanej mapy jest sonda.
+        guard profile.hasVerifiedMap else {
+            nextReadShouldBeQuick = false
+            appendLog(
+                "\(profile.displayName): the kit layout is not mapped yet. "
+                    + "Use “Probe kit area” in the Log tab and send the log over."
+            )
+            status = "\(profile.displayName): kit layout not mapped yet"
+            return
+        }
+
+        readGeneration += 1
+        let generation = readGeneration
+        isQuickRead = nextReadShouldBeQuick
+        nextReadShouldBeQuick = false
+        resetKitState()
         isWriting = false
         pendingLayerCommon = nil
         isReadingKit = true
@@ -2999,6 +3350,11 @@ final class MIDIManager: ObservableObject {
     }
 
     private func sendSysEx(_ bytes: [UInt8]) {
+        // Najpierw domykamy wiszące nuty. Zamknięcie wypuszczone w środek
+        // ramki wraca echem i rozwala jej odbiór; puszczone tuż przed nią
+        // nie przeszkadza nikomu.
+        flushPendingNoteOffs()
+
         // Jedno wąskie gardło dla całego ruchu wychodzącego — także dla serii,
         // która wystartowała jeszcze przed terminem.
         guard !isBlockedByExpiry else {
@@ -3066,7 +3422,7 @@ final class MIDIManager: ObservableObject {
     private func sendRQ1(address: [UInt8], size: [UInt8]) {
         let checksum = rolandChecksum(address + size)
         let message: [UInt8] =
-            [0xF0, 0x41, 0x10, 0x00, 0x00, 0x00, 0x4B, 0x11]
+            [0xF0, 0x41, 0x10] + profile.modelID + [0x11]
             + address
             + size
             + [checksum, 0xF7]
@@ -3074,9 +3430,24 @@ final class MIDIManager: ObservableObject {
     }
 
     private func sendDT1(address: [UInt8], data: [UInt8]) {
+        // Jedyne miejsce w programie, którym cokolwiek trafia do pamięci
+        // modułu — więc tu stoi bezpiecznik. Moduł bez potwierdzonej na
+        // sprzęcie mapy adresów jest wyłącznie do odczytu: zapis pod źle
+        // odgadnięty adres trafia w nieznane miejsce cudzego instrumentu.
+        guard profile.allowsWriting else {
+            lastSendFailed = true
+            appendLog(
+                "WRITE BLOCKED — \(profile.displayName) is read only in this "
+                    + "version. Its address map has not been verified against "
+                    + "real hardware yet."
+            )
+            status = "\(profile.displayName): read only"
+            return
+        }
+
         let checksum = rolandChecksum(address + data)
         let message: [UInt8] =
-            [0xF0, 0x41, 0x10, 0x00, 0x00, 0x00, 0x4B, 0x12]
+            [0xF0, 0x41, 0x10] + profile.modelID + [0x12]
             + address
             + data
             + [checksum, 0xF7]
@@ -5004,7 +5375,7 @@ final class MIDIManager: ObservableObject {
             throw SnapshotError.invalid("Unsupported snapshot version")
         }
         guard let kitNumber = root["kitNumber"] as? Int,
-              (1...100).contains(kitNumber),
+              (1...profile.kitCount).contains(kitNumber),
               let common = root["common"] as? [String: Any],
               let name = common["name"] as? String
         else {
@@ -5531,6 +5902,14 @@ final class MIDIManager: ObservableObject {
 
     private func handleProgramChange(program: Int) {
         guard automaticallyReadChangedKit else { return }
+        // Przy nieznanej mapie każdy obrót pokrętłem uruchamiał dwa odczyty,
+        // z których każdy kończył się linią „nie mam mapy". Numer kitu
+        // zapamiętujemy — przyda się sondzie — ale odczytu nie zaczynamy.
+        guard profile.hasVerifiedMap else {
+            let number = program + 1
+            if (1...profile.kitCount).contains(number) { currentKitNumber = number }
+            return
+        }
         // Program Change przestawia numer bieżącego kitu, a z tego numeru
         // liczy się adres każdego kolejnego zapisu. Słuchamy go więc dopiero
         // wtedy, gdy mamy powód sądzić, że po drugiej stronie jest TD-17 —
@@ -5540,7 +5919,7 @@ final class MIDIManager: ObservableObject {
             return
         }
         let kitNumber = program + 1
-        guard (1...100).contains(kitNumber) else { return }
+        guard (1...profile.kitCount).contains(kitNumber) else { return }
 
         automaticKitReadTask?.cancel()
 
@@ -5670,7 +6049,7 @@ final class MIDIManager: ObservableObject {
             bytes.count >= 15,
             bytes[0] == 0xF0,
             bytes[1] == 0x41,
-            Array(bytes[3...7]) == [0x00, 0x00, 0x00, 0x4B, 0x12],
+            Array(bytes[3...7]) == profile.modelID + [0x12],
             bytes.last == 0xF7
         else {
             return
@@ -5758,14 +6137,16 @@ final class MIDIManager: ObservableObject {
                     + "thr \(info.threshold), curve \(info.curveName)"
             )
 
-            if input < 10 {
+            // Wejścia liczone od 1, więc granicą jest sama liczba wejść:
+            // przy dziesięciu czytamy 1…10 i kończymy na dziesiątym.
+            if input < profile.triggerInputCount {
                 readPhase = .triggerInput(input + 1)
                 requestTriggerInput(input + 1)
             } else {
                 readPhase = .idle
                 isReadingTriggers = false
                 status = "Trigger settings read"
-                appendLog("TRIGGERS: all 10 inputs read")
+                appendLog("TRIGGERS: all \(profile.triggerInputCount) inputs read")
             }
             return
         }
@@ -5785,7 +6166,7 @@ final class MIDIManager: ObservableObject {
             // Ta sama granica co przy zwykłym odczycie numeru kitu: wartość
             // spoza 0…99 przepisana do `currentKitNumber` rozjeżdża adresy
             // wszystkich kolejnych zapisów.
-            guard (0...99).contains(actual) else {
+            guard (0..<profile.kitCount).contains(actual) else {
                 lastWriteConfirmed = false
                 appendLog("The module reported an invalid kit number: \(actual)")
                 status = "The module reported an invalid kit number"
@@ -5845,7 +6226,7 @@ final class MIDIManager: ObservableObject {
             // TD-17 ma 100 kitów. Wszystko poza tym zakresem znaczy, że po
             // drugiej stronie kabla nie jest to, czego się spodziewamy —
             // a z tego numeru liczy się potem adres **każdego** zapisu.
-            guard (0...99).contains(Int(kitIndex)) else {
+            guard (0..<profile.kitCount).contains(Int(kitIndex)) else {
                 appendLog(
                     "The module reported an invalid kit number: \(Int(kitIndex))"
                 )
@@ -8369,10 +8750,10 @@ final class MIDIManager: ObservableObject {
         // co odpowie z właściwą sumą kontrolną. Numer 128 dawał adres
         // 04 7E 00 00 — daleko za końcem obszaru kitów, czyli zapis w miejsce,
         // o którym nie wiemy nic.
-        let safeIndex = min(99, max(0, kitIndex))
-        let base = 3 * 128 * 128 * 128
-        let kitStride = 2 * 128 * 128
-        return encodeBase128(base + safeIndex * kitStride)
+        let safeIndex = min(profile.kitCount - 1, max(0, kitIndex))
+        return encodeBase128(
+            profile.kitAreaBase + safeIndex * profile.kitStride
+        )
     }
 
     private func encodeBase128(_ input: Int) -> [UInt8] {
@@ -8424,12 +8805,15 @@ final class MIDIManager: ObservableObject {
         return id
     }
 
+    /// Punkt końcowy wyglądający na moduł: najpierw ten, na który wskazuje
+    /// bieżący profil, a gdy takiego nie ma — dowolny znany.
     private func td17Endpoint(
         in endpoints: [MIDIEndpointInfo]
     ) -> MIDIEndpointInfo? {
         endpoints.first {
-            $0.name.localizedCaseInsensitiveContains("TD-17")
+            $0.name.localizedCaseInsensitiveContains(profile.portKeyword)
         }
+        ?? endpoints.first { ModuleProfile.matching(portName: $0.name) != nil }
     }
 
     /// Dopisuje linię do bufora i planuje zbiorcze odświeżenie widoku.

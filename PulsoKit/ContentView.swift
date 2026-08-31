@@ -5,7 +5,7 @@ import SwiftUI
 struct ContentView: View {
     /// Jedno miejsce na numer wersji — pokazuje go pasek tytułu i ekran
     /// wygaśnięcia.
-    static let version = "v1.0"
+    static let version = "v1.2"
 
     @EnvironmentObject private var midi: MIDIManager
     @EnvironmentObject private var td0: TD0EditorModel
@@ -214,7 +214,9 @@ struct ContentView: View {
                     Circle()
                         .fill(midi.moduleAvailable ? .green : .gray)
                         .frame(width: 8, height: 8)
-                    Text(midi.moduleAvailable ? "TD-17 connected" : "Module not connected")
+                    Text(midi.moduleAvailable
+                        ? "\(midi.profile.displayName) connected"
+                        : "Module not connected")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(midi.moduleAvailable ? .green : .secondary)
                     Text("•").foregroundStyle(.tertiary)
@@ -246,7 +248,7 @@ struct ContentView: View {
                                 .font(.system(size: 9, weight: .bold))
                                 .frame(width: 22, height: 15)
                         }
-                        .disabled(midi.isOperationInProgress || number >= 100)
+                        .disabled(midi.isOperationInProgress || number >= midi.profile.kitCount)
                         Button {
                             midi.selectPreviousKit()
                         } label: {
@@ -310,6 +312,28 @@ struct ContentView: View {
                 .tracking(1)
                 .foregroundStyle(.secondary)
 
+            // Który moduł program myśli, że widzi — i czy wolno do niego
+            // pisać. Przy module bez potwierdzonej mapy adresów to musi być
+            // widoczne od razu, a nie dopiero w komunikacie po kliknięciu.
+            if !midi.profile.allowsWriting {
+                Label(
+                    "\(midi.profile.displayName) · READ ONLY",
+                    systemImage: "eye"
+                )
+                .font(.caption.bold())
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(.orange.opacity(0.14))
+                )
+                .help(
+                    "The address map for this module has not been verified "
+                        + "against real hardware, so writing is disabled."
+                )
+            }
+
             HStack(spacing: 10) {
                 Picker("Input", selection: $midi.selectedInputID) {
                     Text("None").tag(MIDIEndpointID?.none)
@@ -337,7 +361,7 @@ struct ContentView: View {
 
             Toggle("Auto read", isOn: $midi.automaticallyReadChangedKit)
                 .toggleStyle(.switch)
-                .help("Read the parameters automatically when the kit changes on the TD-17")
+                .help("Read the parameters automatically when the kit changes on the module")
 
             Button { midi.refreshDevices() } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
@@ -411,7 +435,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 14) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(midi.currentKitName ?? "Select a kit on the TD-17")
+                    Text(midi.currentKitName ?? "Select a kit on the module")
                         .font(.system(size: 26, weight: .bold, design: .rounded))
                     HStack(spacing: 8) {
                         if let number = midi.currentKitNumber {
@@ -610,7 +634,7 @@ struct ContentView: View {
                                     ProgressView()
                                         .controlSize(.small)
                                     Label(
-                                        "Settling in the TD-17 — do not change the kit "
+                                        "Settling in the module — do not change the kit "
                                             + "and do not power off the module "
                                             + "(\(midi.stabilizationSecondsRemaining) s)",
                                         systemImage: "externaldrive.badge.timemachine"
@@ -1107,6 +1131,23 @@ struct ContentView: View {
                 // ustawień triggerów.
                 Button("Dump module setup") { midi.dumpModuleSetup() }
                     .disabled(midi.isOperationInProgress || midi.selectedOutputID == nil)
+
+                // Zrzut surowych bajtów jednego kitu. Tą drogą powstała mapa
+                // triggerów TD-17 i tą samą drogą powstanie mapa kitu TD-27.
+                if midi.isDumpingSetup {
+                    Button(role: .cancel) { midi.cancelProbe() } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                    }
+                } else {
+                    // Bez wymogu znanego numeru kitu: przy nieznanej mapie
+                    // numer i tak jest nieznany, a sonda jest wtedy jedynym
+                    // narzędziem, jakie zostaje.
+                    Button("Probe kit area") { midi.probeKitArea() }
+                        .disabled(
+                            midi.selectedOutputID == nil
+                                || midi.isOperationInProgress
+                        )
+                }
             }
             // „Copy log" jest po to, żeby log gdzieś wkleić — zwykle publicznie.
             // A log zawiera nazwy urządzeń MIDI, które na wielu komputerach
@@ -1193,7 +1234,7 @@ private struct KitListMenu: View, Equatable {
                 // Jedna płaska lista. macOS sam ją przewija, gdy nie mieści
                 // się na ekranie — podział na dziesiątki tylko wydłużał drogę
                 // do konkretnego kitu.
-                ForEach(1...100, id: \.self) { number in
+                ForEach(1...midi.profile.kitCount, id: \.self) { number in
                     Button {
                         select(number)
                     } label: {

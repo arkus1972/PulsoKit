@@ -37,7 +37,7 @@ struct KitScreen: View {
                     description: Text(
                         midi.moduleAvailable
                             ? "Press “Read full kit” to load the kit selected on the module."
-                            : "Connect the TD-17 and press “Refresh”."
+                            : "Connect the module and press “Refresh”."
                     )
                 )
             }
@@ -162,7 +162,9 @@ struct KitScreen: View {
                             ZoneField.mainLevel.formatted($0.value(.mainLevel))
                         } ?? ""
                     },
-                    isMuted: { editor.isMuted($0) }
+                    isMuted: { editor.isMuted($0) },
+                    playingZone: midi.nowPlayingZone,
+                    zoneNames: midi.profile.zoneNames
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -206,7 +208,11 @@ struct KitScreen: View {
                 } label: {
                     Label("Undo in module", systemImage: "arrow.uturn.backward.circle")
                 }
-                .disabled(editor.isSending || midi.isOperationInProgress)
+                // `isBusyWithSysEx`, a nie `isOperationInProgress`: to drugie
+                // zawiera odsłuch, a odsłuch startuje zaraz po próbie. Guzik
+                // do jej cofnięcia byłby martwy dokładnie wtedy, gdy się go
+                // słucha i chce nacisnąć.
+                .disabled(editor.isSending || midi.isBusyWithSysEx)
                 .help("Restore the values the module had before the preview")
             } else {
                 Button {
@@ -292,7 +298,29 @@ struct KitScreen: View {
                 )
             }
             .help("Play every pad of the kit in turn")
+
+            // Na słuchawkach dźwięk słychać, ale nie widać, skąd wyszedł.
+            // Scena pokazuje pad, a to nazwę strefy — potrzebną tam, gdzie
+            // pad ma ich kilka (werbel, ride) albo gdzie strefy w ogóle nie
+            // widać na zdjęciu (obręcze, AUX). Stała szerokość, żeby pasek
+            // nie skakał przy każdym uderzeniu.
+            Text(playingZoneLabel)
+                .font(.caption.weight(.semibold).monospaced())
+                .foregroundStyle(Color.pulsoAccent)
+                .lineLimit(1)
+                .frame(width: 92, alignment: .leading)
+                .animation(.easeOut(duration: 0.12), value: midi.nowPlayingZone)
         }
+    }
+
+    /// Nazwa strefy, która właśnie zabrzmiała — pusta przy wyciszonej.
+    ///
+    /// Scena i pastylki wyciszonych nie zapalają. Gdyby pasek robił inaczej,
+    /// byłby jedynym miejscem twierdzącym, że coś gra, przy ciszy
+    /// w słuchawkach.
+    private var playingZoneLabel: String {
+        guard let zone = midi.nowPlayingZone, !editor.isMuted(zone) else { return "" }
+        return midi.nowPlayingZoneName ?? ""
     }
 
     /// Postęp wysyłki, błąd wysyłki i komunikat po przeładowaniu kitu.

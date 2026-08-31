@@ -108,6 +108,18 @@ struct TD17KitStage: View {
     /// i przekreślony, i nie dostaje podświetlenia zaznaczenia.
     var isMuted: (Int) -> Bool = { _ in false }
 
+    /// Strefa, która właśnie zabrzmiała — jej pad dostaje rozbłysk.
+    ///
+    /// Przy odsłuchu na słuchawkach słychać dźwięk, ale nie widać, skąd
+    /// pochodzi. To zamyka tę lukę: patrzysz na scenę i wiesz, który bęben
+    /// właśnie usłyszałeś.
+    var playingZone: Int? = nil
+
+    /// Nazwy stref. Domyślnie TD-17, ale ekran podaje je z profilu modułu,
+    /// żeby pastylka i dolny pasek nigdy nie mówiły o tej samej strefie
+    /// dwóch różnych rzeczy.
+    var zoneNames: [String] = TD17ZoneCatalog.names
+
     @State private var hoveredPad: Int?
 
     var body: some View {
@@ -136,11 +148,15 @@ struct TD17KitStage: View {
                     .frame(width: frame.width, height: frame.height)
                     .offset(x: frame.minX, y: frame.minY)
 
-                // Cztery przebiegi: wyciszenia, pola trafienia, ramki,
-                // na wierzchu podpisy. Inaczej ramka sąsiada potrafiłaby
-                // przykryć podpis, a podpis — przechwycić kliknięcie.
+                // Pięć przebiegów: wyciszenia, rozbłysk grającego pada,
+                // pola trafienia, ramki, na wierzchu podpisy. Inaczej ramka
+                // sąsiada potrafiłaby przykryć podpis, a podpis — przechwycić
+                // kliknięcie.
                 ForEach(TD17KitLayout.pads) { pad in
                     padMute(pad, in: frame)
+                }
+                ForEach(TD17KitLayout.pads) { pad in
+                    padPlaying(pad, in: frame)
                 }
                 ForEach(TD17KitLayout.pads) { pad in
                     padHitArea(pad, in: frame)
@@ -161,7 +177,6 @@ struct TD17KitStage: View {
         }
     }
 
-    /// Przygaszenie i przekreślenie wyciszonego pada.
     /// Wyszarzenie wyciszonego pada.
     ///
     /// Prawie każdy pad ma **kilka stref**: werbel to naciąg i obręcz, ride
@@ -195,6 +210,48 @@ struct TD17KitStage: View {
         }
         .allowsHitTesting(false)
         .position(center(of: pad, in: frame))
+    }
+
+    /// Rozbłysk pada, który właśnie zabrzmiał.
+    ///
+    /// Rysowany **pod** polem trafienia i ramką zaznaczenia, żeby niczego nie
+    /// przykrywał ani nie przechwytywał kliknięć. Kolor akcentu, nie biel:
+    /// scena jest jasna, więc rozjaśnienie ginęłoby na białym naciągu,
+    /// a barwa widać na każdym padzie tak samo.
+    ///
+    /// Wyciszony pad nie błyska, nawet gdy poleci do niego nuta — bo i tak
+    /// nic nie usłyszysz, a rozbłysk bez dźwięku wprowadza w błąd.
+    private func padPlaying(_ pad: TD17StagePad, in frame: CGRect) -> some View {
+        let size = padSize(pad, in: frame)
+        let isPlaying = playingZone.map { zone in
+            pad.zoneIndices.contains(zone) && !isMuted(zone)
+        } ?? false
+
+        return Ellipse()
+            .fill(Color.pulsoAccent.opacity(isPlaying ? 0.42 : 0))
+            .overlay {
+                Ellipse()
+                    .stroke(
+                        Color.pulsoAccent.opacity(isPlaying ? 0.95 : 0),
+                        lineWidth: 2.5
+                    )
+            }
+            .frame(width: size.width, height: size.height)
+            .scaleEffect(isPlaying ? 1.06 : 1)
+            .shadow(
+                color: Color.pulsoAccent.opacity(isPlaying ? 0.65 : 0),
+                radius: 18
+            )
+            .rotationEffect(.degrees(pad.angle))
+            // Zapalenie natychmiastowe, gaszenie łagodne — uderzenie ma być
+            // widoczne w tej samej chwili, w której je słychać, a wybrzmienie
+            // może zejść spokojnie.
+            .animation(
+                isPlaying ? .easeOut(duration: 0.06) : .easeOut(duration: 0.34),
+                value: isPlaying
+            )
+            .allowsHitTesting(false)
+            .position(center(of: pad, in: frame))
     }
 
     /// Pole klikalne — dokładnie w kształcie pada, bez własnej grafiki.
@@ -347,8 +404,12 @@ struct TD17KitStage: View {
     private func chip(_ zone: Int) -> some View {
         let selected = zone == selectedZone
         let muted = isMuted(zone)
-        let name = TD17ZoneCatalog.names.indices.contains(zone)
-            ? TD17ZoneCatalog.names[zone]
+        // Obręcze i strefy AUX nie mają własnego kształtu na zdjęciu, więc
+        // rozbłysk na scenie obejmuje cały pad. Obwódka pastylki mówi
+        // dokładnie, **która** strefa zabrzmiała.
+        let playing = !muted && zone == playingZone
+        let name = zoneNames.indices.contains(zone)
+            ? zoneNames[zone]
             : "STREFA \(zone)"
 
         let background: Color = selected
@@ -374,6 +435,11 @@ struct TD17KitStage: View {
             .foregroundStyle(foreground)
             .background(background)
             .clipShape(Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(Color.pulsoAccent.opacity(playing ? 0.95 : 0), lineWidth: 2)
+            }
+            .animation(playing ? .easeOut(duration: 0.06) : .easeOut(duration: 0.34), value: playing)
         }
         .buttonStyle(.plain)
     }

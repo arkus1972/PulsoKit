@@ -1097,7 +1097,13 @@ final class KitEditor: ObservableObject {
     /// Przywraca w module wartości sprzed odsłuchu, zostawiając zmiany
     /// na liście do dalszej pracy.
     func revertPreview(using midi: MIDIManager) {
-        guard hasPreview, !isSending, !midi.isOperationInProgress else { return }
+        // `isBusyWithSysEx` zamiast `isOperationInProgress`: próba kończy się
+        // odsłuchem, więc warunek z odsłuchem blokowałby powrót przez cały
+        // czas jego trwania.
+        guard hasPreview, !isSending, !midi.isBusyWithSysEx else { return }
+        // Odsłuch schodzi z drogi — inaczej grałby dalej po wartościach,
+        // których już nie ma w module.
+        midi.cancelAudition()
         let restore = previewed
 
         // `push` wysyła zawsze `change.to`, więc do modułu musi pójść lista
